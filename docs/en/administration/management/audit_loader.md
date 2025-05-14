@@ -46,20 +46,15 @@ CREATE TABLE starrocks_audit_db__.starrocks_audit_tbl__ (
   `stmt`              VARCHAR(1048576)           COMMENT "Original SQL statement",
   `digest`            VARCHAR(32)                COMMENT "Slow SQL fingerprint",
   `planCpuCosts`      DOUBLE                     COMMENT "CPU resources consumption time for planning in nanoseconds",
-  `planMemCosts`      DOUBLE                     COMMENT "Memory cost for planning in bytes"
+  `planMemCosts`      DOUBLE                     COMMENT "Memory cost for planning in bytes",
+  `warehouse`         VARCHAR(128)               COMMENT "Warehouse name"
 ) ENGINE = OLAP
 DUPLICATE KEY (`queryId`, `timestamp`, `queryType`)
 COMMENT "Audit log table"
-PARTITION BY RANGE (`timestamp`) ()
-DISTRIBUTED BY HASH (`queryId`) BUCKETS 3 
+PARTITION BY date_trunc('day', `timestamp`)
 PROPERTIES (
-  "dynamic_partition.time_unit" = "DAY",
-  "dynamic_partition.start" = "-30",       -- Keep the audit logs from the latest 30 days. You can adjust this value based on you business demand.
-  "dynamic_partition.end" = "3",
-  "dynamic_partition.prefix" = "p",
-  "dynamic_partition.buckets" = "3",
-  "dynamic_partition.enable" = "true",
-  "replication_num" = "3"                 -- Keep three replicas of audit logs. It is recommended to keep three replicas in a production environment.
+  "replication_num" = "1",
+  "partition_live_number"="30"
 );
 ```
 
@@ -204,6 +199,7 @@ See [INSTALL PLUGIN](../../sql-reference/sql-statements/cluster-management/plugi
           digest:
     planCpuCosts: 0
     planMemCosts: 0
+       warehouse: default_warehouse
     1 row in set (0.01 sec)
     ```
 

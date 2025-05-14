@@ -87,7 +87,7 @@ public class TaskManager implements MemoryTrackable {
 
     // include PENDING/RUNNING taskRun;
     private final TaskRunManager taskRunManager;
-    private final TaskRunScheduler taskRunScheduler;
+    private final TaskRunScheduler taskRunScheduler = new TaskRunScheduler();
 
     // The periodScheduler is used to generate the corresponding TaskRun on time for the Periodical Task.
     // This scheduler can use the time wheel to optimize later.
@@ -107,9 +107,8 @@ public class TaskManager implements MemoryTrackable {
         idToTaskMap = Maps.newConcurrentMap();
         nameToTaskMap = Maps.newConcurrentMap();
         periodFutureMap = Maps.newConcurrentMap();
-        taskRunManager = new TaskRunManager();
+        taskRunManager = new TaskRunManager(taskRunScheduler);
         taskLock = new QueryableReentrantLock(true);
-        taskRunScheduler = taskRunManager.getTaskRunScheduler();
     }
 
     public void start() {
@@ -285,7 +284,8 @@ public class TaskManager implements MemoryTrackable {
         } finally {
             taskRunManager.taskRunUnlock();
         }
-        return taskRunManager.killTaskRun(task.getId(), force);
+        taskRunManager.killTaskRun(task.getId(), force);
+        return true;
     }
 
     public SubmitResult executeTask(String taskName) {
@@ -293,7 +293,7 @@ public class TaskManager implements MemoryTrackable {
         if (task == null) {
             return new SubmitResult(null, SubmitResult.SubmitStatus.FAILED);
         }
-        ExecuteOption option = new ExecuteOption(task.getSource().isMergeable());
+        ExecuteOption option = new ExecuteOption(task);
         option.setManual(true);
         return executeTask(taskName, option);
     }
@@ -311,7 +311,7 @@ public class TaskManager implements MemoryTrackable {
     }
 
     public SubmitResult executeTaskSync(Task task) {
-        return executeTaskSync(task, new ExecuteOption(task.getSource().isMergeable()));
+        return executeTaskSync(task, new ExecuteOption(task));
     }
 
     public SubmitResult executeTaskSync(Task task, ExecuteOption option) {
@@ -376,8 +376,8 @@ public class TaskManager implements MemoryTrackable {
                     }
                     periodFutureMap.remove(task.getId());
                 }
-                if (!killTask(task.getName(), false)) {
-                    LOG.error("kill task failed: " + task.getName());
+                if (!killTask(task.getName(), true)) {
+                    LOG.warn("kill task failed: {}", task.getName());
                 }
                 idToTaskMap.remove(task.getId());
                 nameToTaskMap.remove(task.getName());
@@ -656,7 +656,7 @@ public class TaskManager implements MemoryTrackable {
                 .forEach(addResult);
 
         // history
-        taskRunManager.getTaskRunHistory().lookupHistoryByTaskNames(dbName, taskNames)
+        taskRunManager.getTaskRunHistory().lookupLastJobOfTasks(dbName, taskNames)
                 .stream()
                 .filter(taskRunFilter)
                 .forEach(addResult);
@@ -696,17 +696,16 @@ public class TaskManager implements MemoryTrackable {
                     LOG.warn("fail to obtain task name {} because task is null", taskName);
                     return;
                 }
-                ExecuteOption executeOption = new ExecuteOption(task.getSource().isMergeable());
+                ExecuteOption executeOption = new ExecuteOption(task);
                 executeOption.setReplay(true);
                 TaskRun taskRun = TaskRunBuilder
                         .newBuilder(task)
                         .setExecuteOption(executeOption)
                         .build();
-
                 // TODO: To avoid the same query id collision, use a new query id instead of an old query id
                 taskRun.initStatus(status.getQueryId(), status.getCreateTime());
-                if (!taskRunManager.arrangeTaskRun(taskRun, true)) {
-                    LOG.warn("Submit task run to pending queue failed, reject the submit:{}", taskRun);
+                if (!taskRunScheduler.addPendingTaskRun(taskRun)) {
+                    LOG.warn("Submit task run to pending queue failed in follower, reject the submit:{}", taskRun);
                 }
                 break;
             // this will happen in build image
@@ -717,6 +716,7 @@ public class TaskManager implements MemoryTrackable {
             case FAILED:
                 taskRunManager.getTaskRunHistory().addHistory(status);
                 break;
+            case MERGED:
             case SUCCESS:
                 status.setProgress(100);
                 taskRunManager.getTaskRunHistory().addHistory(status);

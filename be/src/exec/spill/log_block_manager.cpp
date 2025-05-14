@@ -32,6 +32,7 @@
 #include "fs/fs.h"
 #include "gutil/casts.h"
 #include "io/input_stream.h"
+#include "io/io_profiler.h"
 #include "runtime/exec_env.h"
 #include "storage/options.h"
 #include "util/defer_op.h"
@@ -81,13 +82,23 @@ public:
     std::string parent_path() const { return fmt::format("{}/{}", _dir->dir(), print_id(_query_id)); }
     uint64_t id() const { return _id; }
 
-    bool pre_allocate(size_t allocate_size) {
-        if (_dir->inc_size(allocate_size)) {
-            _acquired_data_size += allocate_size;
+    // Count acquired_size, then return the remaing size to dir to avoid too much error in counting.
+    void add_acquired_size(size_t acquired_size) {
+        size_t remaing_size = _acquired_data_size - _data_size;
+        _acquired_data_size += acquired_size - remaing_size;
+        _dir->dec_size(remaing_size);
+    }
+
+    bool try_acquire_sizes(size_t allocate_size) {
+        if (_data_size + allocate_size <= _acquired_data_size) {
             return true;
-        } else {
-            return false;
         }
+        size_t extra_size = _data_size + allocate_size - _acquired_data_size;
+        if (_dir->inc_size(extra_size)) {
+            _acquired_data_size += extra_size;
+            return true;
+        }
+        return false;
     }
 
     Status append_data(const std::vector<Slice>& data, size_t total_size);
@@ -140,7 +151,10 @@ Status LogBlockContainer::close() {
 }
 
 Status LogBlockContainer::append_data(const std::vector<Slice>& data, size_t total_size) {
+    auto* dir = _dir.get();
+    RETURN_IF(!try_acquire_sizes(total_size), DISK_ACQUIRE_ERROR(total_size, dir));
     RETURN_IF_ERROR(_writable_file->pre_allocate(total_size));
+    auto scope = IOProfiler::scope(IOProfiler::TAG::TAG_SPILL, 0);
     RETURN_IF_ERROR(_writable_file->appendv(data.data(), data.size()));
     _data_size += total_size;
     return Status::OK();
@@ -175,6 +189,11 @@ public:
     LogBlockReader(const Block* block, const BlockReaderOptions& options = {}) : BlockReader(block, options) {}
 
     ~LogBlockReader() override = default;
+
+    Status read_fully(void* data, int64_t count) override {
+        auto scope = IOProfiler::scope(IOProfiler::TAG_SPILL, 0);
+        return BlockReader::read_fully(data, count);
+    }
 
     std::string debug_string() override { return _block->debug_string(); }
 
@@ -218,7 +237,7 @@ public:
 #endif
     }
 
-    bool preallocate(size_t write_size) override { return _container->pre_allocate(write_size); }
+    bool try_acquire_sizes(size_t size) override { return _container->try_acquire_sizes(size); }
 
 private:
     LogBlockContainerPtr _container;
@@ -252,11 +271,7 @@ StatusOr<BlockPtr> LogBlockManager::acquire_block(const AcquireBlockOptions& opt
     DCHECK(opts.block_size > 0) << "block size should be larger than 0";
     AcquireDirOptions acquire_dir_opts;
     acquire_dir_opts.data_size = opts.block_size;
-#ifdef BE_TEST
     ASSIGN_OR_RETURN(auto dir, _dir_mgr->acquire_writable_dir(acquire_dir_opts));
-#else
-    ASSIGN_OR_RETURN(auto dir, ExecEnv::GetInstance()->spill_dir_mgr()->acquire_writable_dir(acquire_dir_opts));
-#endif
 
     ASSIGN_OR_RETURN(auto block_container,
                      get_or_create_container(dir, opts.fragment_instance_id, opts.plan_node_id, opts.name,
@@ -317,6 +332,7 @@ StatusOr<LogBlockContainerPtr> LogBlockManager::get_or_create_container(
         auto container = q->front();
         TRACE_SPILL_LOG << "return an existed container: " << container->path();
         q->pop();
+        container->add_acquired_size(block_size);
         return container;
     }
     uint64_t id = _next_container_id++;
@@ -327,5 +343,4 @@ StatusOr<LogBlockContainerPtr> LogBlockManager::get_or_create_container(
     RETURN_IF_ERROR(block_container->open());
     return block_container;
 }
-
 } // namespace starrocks::spill

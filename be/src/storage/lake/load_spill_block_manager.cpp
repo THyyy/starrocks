@@ -22,8 +22,65 @@
 #include "fs/fs_util.h"
 #include "fs/key_cache.h"
 #include "runtime/exec_env.h"
+#include "util/threadpool.h"
 
 namespace starrocks::lake {
+
+static int calc_max_merge_blocks_thread() {
+#ifndef BE_TEST
+    // The starting point for setting the maximum number of threads for load spill:
+    // 1. Meet the memory limit requirements (by config::load_spill_merge_memory_limit_percent) for load spill.
+    // 2. Each thread can use 1GB(by config::load_spill_max_merge_bytes) of memory.
+    // 3. The maximum number of threads is limited by config::load_spill_merge_max_thread.
+    int64_t load_spill_merge_memory_limit_bytes = GlobalEnv::GetInstance()->process_mem_tracker()->limit() *
+                                                  config::load_spill_merge_memory_limit_percent / (int64_t)100;
+    int max_merge_blocks_thread = load_spill_merge_memory_limit_bytes / config::load_spill_max_merge_bytes;
+#else
+    int max_merge_blocks_thread = 1;
+#endif
+
+    return std::max<int>(1, std::min<int>(max_merge_blocks_thread, config::load_spill_merge_max_thread));
+}
+
+Status LoadSpillBlockMergeExecutor::init() {
+    RETURN_IF_ERROR(ThreadPoolBuilder("load_spill_block_merge")
+                            .set_min_threads(1)
+                            .set_max_threads(calc_max_merge_blocks_thread())
+                            .set_max_queue_size(40960 /*a random chosen number that should big enough*/)
+                            .set_idle_timeout(MonoDelta::FromMilliseconds(/*5 minutes=*/5 * 60 * 1000))
+                            .build(&_merge_pool));
+    return Status::OK();
+}
+
+Status LoadSpillBlockMergeExecutor::refresh_max_thread_num() {
+    if (_merge_pool != nullptr) {
+        return _merge_pool->update_max_threads(calc_max_merge_blocks_thread());
+    }
+    return Status::OK();
+}
+
+std::unique_ptr<ThreadPoolToken> LoadSpillBlockMergeExecutor::create_token() {
+    return _merge_pool->new_token(ThreadPool::ExecutionMode::SERIAL);
+}
+
+void LoadSpillBlockContainer::append_block(const spill::BlockPtr& block) {
+    std::lock_guard guard(_mutex);
+    _block_groups.back().append(block);
+}
+
+void LoadSpillBlockContainer::create_block_group() {
+    std::lock_guard guard(_mutex);
+    _block_groups.emplace_back(spill::BlockGroup());
+}
+
+bool LoadSpillBlockContainer::empty() {
+    std::lock_guard guard(_mutex);
+    return _block_groups.empty();
+}
+
+spill::BlockPtr LoadSpillBlockContainer::get_block(size_t gid, size_t bid) {
+    return _block_groups[gid].blocks()[bid];
+}
 
 LoadSpillBlockManager::~LoadSpillBlockManager() {
     // release blocks before block manager
@@ -48,18 +105,20 @@ Status LoadSpillBlockManager::init() {
                                                                  std::move(remote_block_manager));
     // init block container
     _block_container = std::make_unique<LoadSpillBlockContainer>();
+    _initialized = true;
     return Status::OK();
 }
 
 // acquire Block from BlockManager
-StatusOr<spill::BlockPtr> LoadSpillBlockManager::acquire_block(int64_t tablet_id, int64_t txn_id, size_t block_size) {
+StatusOr<spill::BlockPtr> LoadSpillBlockManager::acquire_block(size_t block_size, bool force_remote) {
     spill::AcquireBlockOptions opts;
     opts.query_id = _load_id; // load id as query id
     opts.fragment_instance_id =
-            UniqueId(tablet_id, txn_id).to_thrift(); // use tablet id + txn id to generate fragment instance id
+            UniqueId(_tablet_id, _txn_id).to_thrift(); // use tablet id + txn id to generate fragment instance id
     opts.plan_node_id = 0;
     opts.name = "load_spill";
     opts.block_size = block_size;
+    opts.force_remote = force_remote;
     return _block_manager->acquire_block(opts);
 }
 

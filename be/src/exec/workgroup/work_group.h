@@ -101,6 +101,7 @@ using WorkGroupScanSchedEntity = WorkGroupSchedEntity<ScanTaskQueue>;
 struct RunningQueryToken {
     explicit RunningQueryToken(WorkGroupPtr wg) : wg(std::move(wg)) {}
     ~RunningQueryToken();
+    WorkGroupPtr get_wg() { return wg; }
 
 private:
     WorkGroupPtr wg;
@@ -127,6 +128,7 @@ public:
     void copy_metrics(const WorkGroup& rhs);
 
     MemTracker* mem_tracker() { return _mem_tracker.get(); }
+    std::shared_ptr<MemTracker> grab_mem_tracker() { return _mem_tracker; }
     const MemTracker* mem_tracker() const { return _mem_tracker.get(); }
     MemTracker* connector_scan_mem_tracker() { return _connector_scan_mem_tracker.get(); }
 
@@ -280,6 +282,8 @@ public:
     WorkGroupPtr get_default_workgroup();
     // return reserved beforehand default mv workgroup for MV query is not bound to any workgroup
     WorkGroupPtr get_default_mv_workgroup();
+
+    size_t num_workgroups() const { return _workgroups.size(); }
 
     void close();
     // destruct workgroups

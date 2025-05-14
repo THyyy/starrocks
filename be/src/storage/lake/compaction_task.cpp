@@ -27,7 +27,7 @@ CompactionTask::CompactionTask(VersionedTablet tablet, std::vector<std::shared_p
         : _txn_id(context->txn_id),
           _tablet(std::move(tablet)),
           _input_rowsets(std::move(input_rowsets)),
-          _mem_tracker(std::make_unique<MemTracker>(MemTracker::COMPACTION, -1,
+          _mem_tracker(std::make_unique<MemTracker>(MemTrackerType::COMPACTION_TASK, -1,
                                                     "Compaction-" + std::to_string(_tablet.metadata()->id()),
                                                     GlobalEnv::GetInstance()->compaction_mem_tracker())),
           _context(context),
@@ -35,11 +35,19 @@ CompactionTask::CompactionTask(VersionedTablet tablet, std::vector<std::shared_p
 
 Status CompactionTask::execute_index_major_compaction(TxnLogPB* txn_log) {
     if (_tablet.get_schema()->keys_type() == KeysType::PRIMARY_KEYS) {
-        SCOPED_RAW_TIMER(&_context->stats->sst_merge_ns);
+        SCOPED_RAW_TIMER(&_context->stats->pk_sst_merge_ns);
         auto metadata = _tablet.metadata();
         if (metadata->enable_persistent_index() &&
             metadata->persistent_index_type() == PersistentIndexTypePB::CLOUD_NATIVE) {
-            return _tablet.tablet_manager()->update_mgr()->execute_index_major_compaction(*metadata, txn_log);
+            RETURN_IF_ERROR(_tablet.tablet_manager()->update_mgr()->execute_index_major_compaction(*metadata, txn_log));
+            if (txn_log->has_op_compaction() && !txn_log->op_compaction().input_sstables().empty()) {
+                size_t total_input_sstable_file_size = 0;
+                for (const auto& input_sstable : txn_log->op_compaction().input_sstables()) {
+                    total_input_sstable_file_size += input_sstable.filesize();
+                }
+                _context->stats->input_file_size += total_input_sstable_file_size;
+            }
+            return Status::OK();
         }
     }
     return Status::OK();

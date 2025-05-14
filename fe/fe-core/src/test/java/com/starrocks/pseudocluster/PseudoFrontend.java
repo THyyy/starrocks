@@ -175,9 +175,7 @@ public class PseudoFrontend {
 
             try {
                 // init config
-                Config config = new Config();
-                config.init(frontend.getRunningDir() + "/conf/fe.conf");
-                config.initMutable(frontend.getRunningDir() + "/conf/fe_mutable.conf");
+                new Config().init(frontend.getRunningDir() + "/conf/fe.conf");
                 Config.statistic_collect_query_timeout = 60;
 
                 Log4jConfig.initLogging();
@@ -185,7 +183,7 @@ public class PseudoFrontend {
                 // set dns cache ttl
                 java.security.Security.setProperty("networkaddress.cache.ttl", "60");
 
-                FrontendOptions.init(new String[0]);
+                FrontendOptions.init(null);
                 ExecuteEnv.setup();
 
                 if (frontend.fakeJournal) {
@@ -198,7 +196,7 @@ public class PseudoFrontend {
                     };
                 }
 
-                GlobalStateMgr.getCurrentState().initialize(args);
+                GlobalStateMgr.getCurrentState().initialize(null);
                 GlobalStateMgr.getCurrentState().setStatisticStorage(new EmptyStatisticStorage());
                 StateChangeExecutor.getInstance().registerStateChangeExecution(
                         GlobalStateMgr.getCurrentState().getStateChangeExecution());
@@ -208,8 +206,7 @@ public class PseudoFrontend {
 
                 GlobalStateMgr.getCurrentState().waitForReady();
 
-                QeService qeService = new QeService(Config.query_port, Config.mysql_service_nio_enabled,
-                        ExecuteEnv.getInstance().getScheduler());
+                QeService qeService = new QeService(Config.query_port, ExecuteEnv.getInstance().getScheduler());
                 qeService.start();
 
                 ThreadPoolManager.registerAllThreadPoolMetric();

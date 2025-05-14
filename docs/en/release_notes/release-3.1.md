@@ -4,6 +4,38 @@ displayed_sidebar: docs
 
 # StarRocks version 3.1
 
+## 3.1.17
+
+Release Date: January 3, 2025
+
+### Bug Fixes
+
+Fixed the following issues:
+
+- Cross-cluster Data Migration Tool caused the Follower FE to crash during data synchronization and commit, due to not accounting for the deletion of partitions in the target cluster. [#54061](https://github.com/StarRocks/starrocks/pull/54061)
+- BE in the target cluster might crash when synchronizing tables with DELETE operations using Cross-cluster Data Migration Tool. [#54081](https://github.com/StarRocks/starrocks/pull/54081)
+- A bug in the BDBJE handshake mechanism where Leader FE would reject reconnection attempts from Follower FE when connection is being re-established, causing Follower FE nodes to exit. [#50412](https://github.com/StarRocks/starrocks/pull/50412)
+- Duplicate memory statistics in FE leads to excessive memory usage. [#53055](https://github.com/StarRocks/starrocks/pull/53055)
+- The statuses of asynchronous materialized view refresh tasks are inconsistent across multiple FE nodes, which lead to inaccurate states of the materialized view during queries. [#54236](https://github.com/StarRocks/starrocks/pull/54236)
+
+## 3.1.16
+
+Release date: December 16, 2024
+
+### Improvements
+
+- Optimized table-related statistics. [#50316](https://github.com/StarRocks/starrocks/pull/50316)
+
+### Bug Fixes
+
+Fixed the following issues:
+
+- Insufficient granularity in error code handling for disk full scenarios caused the BE to mistakenly identify disk errors and delete data. [#51411](https://github.com/StarRocks/starrocks/pull/51411)
+- Stream Load failures when submitted using HTTP 1.0. [#53010](https://github.com/StarRocks/starrocks/pull/53010) [#53008](https://github.com/StarRocks/starrocks/pull/53008)
+- Routine Load tasks were canceled due to expired transactions (now tasks are canceled only if the database or table no longer exists and paused when transactions expired). [#50334](https://github.com/StarRocks/starrocks/pull/50334)
+- Unloading data using `EXPORT` with Broker to `file://` resulted in a file rename error, causing the export to fail. [#52544](https://github.com/StarRocks/starrocks/pull/52544)
+- If the join condition in an equal-join is an expression based on a low-cardinality column, the system may incorrectly push down a Runtime Filter predicate, leading to a BE crash. [#50690](https://github.com/StarRocks/starrocks/pull/50690)
+
 ## 3.1.15
 
 Release date: September 4, 2024
@@ -423,7 +455,13 @@ Fixed the following issues:
 - From v3.1.4 onwards, persistent indexing is enabled by default for Primary Key tables created in new StarRocks clusters (this does not apply to existing StarRocks clusters whose versions are upgraded to v3.1.4 from an earlier version). [#33374](https://github.com/StarRocks/starrocks/pull/33374)
 - A new FE parameter `enable_sync_publish` which is set to `true` by default is added. When this parameter is set to `true`, the Publish phase of a data load into a Primary Key table returns the execution result only after the Apply task finishes. As such, the data loaded can be queried immediately after the load job returns a success message. However, setting this parameter to `true` may cause data loads into Primary Key tables to take a longer time. (Before this parameter is added, the Apply task is asynchronous with the Publish phase.) [#27055](https://github.com/StarRocks/starrocks/pull/27055)
 
-## 3.1.3
+## 3.1.3 (Yanked)
+
+:::tip
+
+This version has been taken offline.
+
+:::
 
 Release date: September 25, 2023
 

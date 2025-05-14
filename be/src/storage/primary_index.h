@@ -54,6 +54,9 @@ public:
     // [thread-safe]
     void unload();
 
+    // Whether index is normally loaded
+    bool is_loaded();
+
     // insert new primary keys into this index. caller need to make sure key doesn't exists
     // in index
     // [not thread-safe]
@@ -152,6 +155,8 @@ public:
     void reset_cancel_major_compaction();
 
     Status pk_dump(PrimaryKeyDump* dump, PrimaryIndexMultiLevelPB* dump_pb);
+
+    Status get_load_status() { return _status; }
 
     // only for ut
     void set_status(bool loaded, Status st) {

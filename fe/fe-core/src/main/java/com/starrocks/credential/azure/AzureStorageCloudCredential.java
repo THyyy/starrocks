@@ -15,6 +15,8 @@
 package com.starrocks.credential.azure;
 
 import com.google.common.base.Preconditions;
+import com.staros.proto.ADLS2CredentialInfo;
+import com.staros.proto.ADLS2FileStoreInfo;
 import com.staros.proto.AzBlobCredentialInfo;
 import com.staros.proto.AzBlobFileStoreInfo;
 import com.staros.proto.FileStoreInfo;
@@ -183,29 +185,35 @@ class AzureADLS1CloudCredential extends AzureStorageCloudCredential {
 }
 
 class AzureADLS2CloudCredential extends AzureStorageCloudCredential {
+    private final String endpoint;
     private final boolean oauth2ManagedIdentity;
     private final String oauth2TenantId;
     private final String oauth2ClientId;
     private final String storageAccount;
     private final String sharedKey;
+    private final String sasToken;
     private final String oauth2ClientSecret;
     private final String oauth2ClientEndpoint;
 
-    public AzureADLS2CloudCredential(boolean oauth2ManagedIdentity, String oauth2TenantId, String oauth2ClientId,
-                                     String storageAccount, String sharedKey, String oauth2ClientSecret,
+    public AzureADLS2CloudCredential(String endpoint, boolean oauth2ManagedIdentity, String oauth2TenantId, String oauth2ClientId,
+                                     String storageAccount, String sharedKey, String sasToken, String oauth2ClientSecret,
                                      String oauth2ClientEndpoint) {
+        Preconditions.checkNotNull(endpoint);
         Preconditions.checkNotNull(oauth2TenantId);
         Preconditions.checkNotNull(oauth2ClientId);
         Preconditions.checkNotNull(storageAccount);
         Preconditions.checkNotNull(sharedKey);
+        Preconditions.checkNotNull(sasToken);
         Preconditions.checkNotNull(oauth2ClientSecret);
         Preconditions.checkNotNull(oauth2ClientEndpoint);
 
+        this.endpoint = endpoint;
         this.oauth2ManagedIdentity = oauth2ManagedIdentity;
         this.oauth2TenantId = oauth2TenantId;
         this.oauth2ClientId = oauth2ClientId;
         this.storageAccount = storageAccount;
         this.sharedKey = sharedKey;
+        this.sasToken = sasToken;
         this.oauth2ClientSecret = oauth2ClientSecret;
         this.oauth2ClientEndpoint = oauth2ClientEndpoint;
 
@@ -224,14 +232,39 @@ class AzureADLS2CloudCredential extends AzureStorageCloudCredential {
                     oauth2TenantId);
             generatedConfigurationMap.put(createConfigKey(ConfigurationKeys.FS_AZURE_ACCOUNT_OAUTH_CLIENT_ID),
                     oauth2ClientId);
-        } else if (!storageAccount.isEmpty() && !sharedKey.isEmpty()) {
+        } else if (!sharedKey.isEmpty()) {
             // Shared Key is always used by specific storage account, so we don't need to invoke createConfigKey()
-            generatedConfigurationMap.put(
-                    String.format("fs.azure.account.auth.type.%s.dfs.core.windows.net", storageAccount),
-                    "SharedKey");
-            generatedConfigurationMap.put(
-                    String.format("fs.azure.account.key.%s.dfs.core.windows.net", storageAccount),
-                    sharedKey);
+            if (!storageAccount.isEmpty()) {
+                generatedConfigurationMap.put(
+                        String.format("fs.azure.account.auth.type.%s.dfs.core.windows.net", storageAccount),
+                        "SharedKey");
+                generatedConfigurationMap.put(
+                        String.format("fs.azure.account.key.%s.dfs.core.windows.net", storageAccount),
+                        sharedKey);
+            } else if (!endpoint.isEmpty()) {
+                generatedConfigurationMap.put(
+                        String.format("fs.azure.account.auth.type.%s", endpoint),
+                        "SharedKey");
+                generatedConfigurationMap.put(
+                        String.format("fs.azure.account.key.%s", endpoint),
+                        sharedKey);
+            }
+        } else if (!sasToken.isEmpty()) {
+            if (!storageAccount.isEmpty()) {
+                generatedConfigurationMap.put(
+                        String.format("fs.azure.account.auth.type.%s.dfs.core.windows.net", storageAccount),
+                        "SAS");
+                generatedConfigurationMap.put(
+                        String.format("fs.azure.sas.fixed.token.%s.dfs.core.windows.net", storageAccount),
+                        sasToken);
+            } else if (!endpoint.isEmpty()) {
+                generatedConfigurationMap.put(
+                        String.format("fs.azure.account.auth.type.%s", endpoint),
+                        "SAS");
+                generatedConfigurationMap.put(
+                        String.format("fs.azure.sas.fixed.token.%s", endpoint),
+                        sasToken);
+            }
         } else if (!oauth2ClientId.isEmpty() && !oauth2ClientSecret.isEmpty() &&
                 !oauth2ClientEndpoint.isEmpty()) {
             generatedConfigurationMap.put(createConfigKey(ConfigurationKeys.FS_AZURE_ACCOUNT_AUTH_TYPE_PROPERTY_NAME),
@@ -263,8 +296,20 @@ class AzureADLS2CloudCredential extends AzureStorageCloudCredential {
 
     @Override
     public FileStoreInfo toFileStoreInfo() {
-        // TODO: Support azure credential
-        return null;
+        FileStoreInfo.Builder fileStore = FileStoreInfo.newBuilder();
+        fileStore.setFsType(FileStoreType.ADLS2);
+        ADLS2FileStoreInfo.Builder adls2FileStoreInfo = ADLS2FileStoreInfo.newBuilder();
+        adls2FileStoreInfo.setEndpoint(endpoint);
+        ADLS2CredentialInfo.Builder adls2CredentialInfo = ADLS2CredentialInfo.newBuilder();
+        adls2CredentialInfo.setSharedKey(sharedKey);
+        adls2CredentialInfo.setSasToken(sasToken);
+        adls2CredentialInfo.setTenantId(oauth2TenantId);
+        adls2CredentialInfo.setClientId(oauth2ClientId);
+        adls2CredentialInfo.setClientSecret(oauth2ClientSecret);
+        adls2CredentialInfo.setAuthorityHost(oauth2ClientEndpoint);
+        adls2FileStoreInfo.setCredential(adls2CredentialInfo.build());
+        fileStore.setAdls2FsInfo(adls2FileStoreInfo.build());
+        return fileStore.build();
     }
 
     // Create Hadoop configuration key for specific storage account, if storage account is not set, means this property

@@ -3,7 +3,7 @@ displayed_sidebar: docs
 sidebar_position: 0.9
 ---
 
-# Java UDFs
+# Java UDF
 
 From v2.2.0 onwards, you can compile user-defined functions (UDFs) to suit your specific business needs by using the Java programming language.
 
@@ -536,6 +536,8 @@ For more information, see [DROP FUNCTION](../sql-statements/Function/DROP_FUNCTI
 
 ## Mapping between SQL data types and Java data types
 
+Only non-nested Arrays/Maps are now supported.
+
 | SQL TYPE       | Java TYPE         |
 | -------------- | ----------------- |
 | BOOLEAN        | java.lang.Boolean |
@@ -546,6 +548,8 @@ For more information, see [DROP FUNCTION](../sql-statements/Function/DROP_FUNCTI
 | FLOAT          | java.lang.Float   |
 | DOUBLE         | java.lang.Double  |
 | STRING/VARCHAR | java.lang.String  |
+| ARRAY          | java.util.List    |
+| Map            | java.util.Map     |
 
 ## Parameter settings
 

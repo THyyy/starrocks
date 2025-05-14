@@ -124,7 +124,8 @@ TEST(ConjunctivePredicatesTest, test_evaluate) {
     c4->append_datum(Datum(DecimalV2Value("0.000002")));
     c4->append_datum(Datum(DecimalV2Value("0.000003")));
 
-    ChunkPtr chunk = std::make_shared<Chunk>(Columns{c0, c1, c2, c3, c4}, schema);
+    ChunkPtr chunk = std::make_shared<Chunk>(
+            Columns{std::move(c0), std::move(c1), std::move(c2), std::move(c3), std::move(c4)}, schema);
 
     std::vector<uint8_t> selection(chunk->num_rows(), 0);
 
@@ -190,7 +191,7 @@ TEST(ConjunctivePredicatesTest, test_evaluate_and) {
     c0->append_datum(Datum(2));
     c0->append_datum(Datum(3));
 
-    ChunkPtr chunk = std::make_shared<Chunk>(Columns{c0}, schema);
+    ChunkPtr chunk = std::make_shared<Chunk>(Columns{std::move(c0)}, schema);
 
     {
         std::vector<uint8_t> selection(chunk->num_rows(), 0);
@@ -229,7 +230,7 @@ TEST(ConjunctivePredicatesTest, test_evaluate_or) {
     c0->append_datum(Datum(2));
     c0->append_datum(Datum(3));
 
-    ChunkPtr chunk = std::make_shared<Chunk>(Columns{c0}, schema);
+    ChunkPtr chunk = std::make_shared<Chunk>(Columns{std::move(c0)}, schema);
 
     {
         std::vector<uint8_t> selection(chunk->num_rows(), 0);
@@ -403,18 +404,18 @@ TEST_P(ConjunctiveTestFixture, test_parse_conjuncts) {
 
 TEST_F(ConjunctiveTestFixture, test_connector_parse_conjuncts) {
     std::vector<SlotDescriptor*> slot_descriptors;
-    SlotDescriptor slot{1, "name", TypeDescriptor::from_logical_type(TYPE_INT)};
+    SlotDescriptor slot{1, "name", TYPE_INT_DESC};
     slot_descriptors.emplace_back(&slot);
 
     ConnectorPredicateParser parser{&slot_descriptors};
     ColumnPredicate* predicate = nullptr;
-    ASSERT_FALSE(parser.can_pushdown(predicate));
+    ASSERT_TRUE(parser.can_pushdown(predicate));
     SlotDescriptor* slot_desc = nullptr;
-    ASSERT_FALSE(parser.can_pushdown(slot_desc));
+    ASSERT_TRUE(parser.can_pushdown(slot_desc));
 
     PredicateAndNode and_node{};
     ConstPredicateNodePtr node{&and_node};
-    ASSERT_FALSE(parser.can_pushdown(node));
+    ASSERT_TRUE(parser.can_pushdown(node));
     ASSERT_EQ(parser.column_id(slot), 1);
 }
 

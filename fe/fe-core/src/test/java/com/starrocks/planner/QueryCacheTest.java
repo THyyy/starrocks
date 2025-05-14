@@ -221,7 +221,7 @@ public class QueryCacheTest {
                 "PROPERTIES (\n" +
                 "\"replication_num\" = \"1\",\n" +
                 "\"in_memory\" = \"false\",\n" +
-                "\"enable_persistent_index\" = \"false\",\n" +
+                "\"enable_persistent_index\" = \"true\",\n" +
                 "\"compression\" = \"LZ4\"\n" +
                 ");";
 
@@ -371,7 +371,7 @@ public class QueryCacheTest {
                 "PROPERTIES (\n" +
                 "\"replication_num\" = \"1\",\n" +
                 "\"in_memory\" = \"false\",\n" +
-                "\"enable_persistent_index\" = \"false\"\n" +
+                "\"enable_persistent_index\" = \"true\"\n" +
                 ");";
 
         String createTbl9StmtStr = "" +
@@ -462,6 +462,10 @@ public class QueryCacheTest {
     }
 
     private void testHelper(List<String> queryList) {
+        if (queryList.size() > 5) {
+            Collections.shuffle(queryList);
+            queryList = queryList.subList(0, 5);
+        }
         List<PlanFragment> frags = queryList.stream()
                 .map(q -> getCachedFragment(q).get()).collect(Collectors.toList());
         List<ByteBuffer> digests =

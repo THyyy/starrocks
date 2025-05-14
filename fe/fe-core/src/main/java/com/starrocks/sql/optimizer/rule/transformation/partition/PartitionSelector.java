@@ -38,16 +38,17 @@ import com.starrocks.catalog.Table;
 import com.starrocks.catalog.system.information.InfoSchemaDb;
 import com.starrocks.catalog.system.information.PartitionsMetaSystemTable;
 import com.starrocks.common.Pair;
-import com.starrocks.load.pipe.filelist.RepoExecutor;
 import com.starrocks.planner.PartitionColumnFilter;
 import com.starrocks.planner.PartitionPruner;
 import com.starrocks.planner.RangePartitionPruner;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.qe.SimpleExecutor;
 import com.starrocks.qe.SqlModeHelper;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.analyzer.AnalyzeState;
 import com.starrocks.sql.analyzer.ExpressionAnalyzer;
 import com.starrocks.sql.analyzer.Field;
+import com.starrocks.sql.analyzer.MaterializedViewAnalyzer;
 import com.starrocks.sql.analyzer.RelationFields;
 import com.starrocks.sql.analyzer.RelationId;
 import com.starrocks.sql.analyzer.Scope;
@@ -82,6 +83,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -125,15 +127,26 @@ public class PartitionSelector {
         return getPartitionIdsByExpr(context, tableName, olapTable, whereExpr, isRecyclingCondition, null);
     }
 
-    /**
-     * Return filtered partition ids by whereExpr with extra input cells which are used for mv refresh.
-     */
     public static List<Long> getPartitionIdsByExpr(ConnectContext context,
                                                    TableName tableName,
                                                    OlapTable olapTable,
                                                    Expr whereExpr,
                                                    boolean isRecyclingCondition,
-                                                   Map<Long, PCell> inputCells) {
+                                                   Map<Expr, Expr> partitionByExprMap) {
+        return getPartitionIdsByExpr(context, tableName, olapTable, whereExpr, isRecyclingCondition,
+                null, partitionByExprMap);
+    }
+
+    /**
+     * Return filtered partition ids by whereExpr with extra input cells which are used for mv refresh.
+     */
+    private static List<Long> getPartitionIdsByExpr(ConnectContext context,
+                                                    TableName tableName,
+                                                    OlapTable olapTable,
+                                                    Expr whereExpr,
+                                                    boolean isRecyclingCondition,
+                                                    Map<Long, PCell> inputCells,
+                                                    Map<Expr, Expr> partitionByExprMap) {
         PartitionInfo partitionInfo = olapTable.getPartitionInfo();
         if (!partitionInfo.isPartitioned()) {
             throw new SemanticException("Can't drop partitions with where expression since it is not partitioned");
@@ -143,6 +156,14 @@ public class PartitionSelector {
                         .map(col -> new Field(col.getName(), col.getType(), tableName, null))
                         .collect(Collectors.toList())));
         ExpressionAnalyzer.analyzeExpression(whereExpr, new AnalyzeState(), scope, context);
+
+        // replace partitionByExpr with partition slotRef if partitionByExprMap is not empty.
+        if (olapTable.isMaterializedView() && CollectionUtils.sizeIsEmpty(partitionByExprMap)) {
+            partitionByExprMap = MaterializedViewAnalyzer.getMVPartitionByExprToAdjustMap(tableName,
+                    (MaterializedView) olapTable);
+        }
+        whereExpr = MaterializedViewAnalyzer.adjustWhereExprIfNeeded(partitionByExprMap, whereExpr, scope, context);
+
         ColumnRefFactory columnRefFactory = new ColumnRefFactory();
         Map<Column, ColumnRefOperator> columnRefOperatorMap = Maps.newHashMap();
         List<ColumnRefOperator> columnRefOperators = Lists.newArrayList();
@@ -185,6 +206,7 @@ public class PartitionSelector {
             gcExprToColRefMap.put(scalarOperator, columnRefOperatorMap.get(column));
         }
         expressionMapping.addGeneratedColumnExprOpToColumnRef(gcExprToColRefMap);
+        // substitute generated column expr if whereExpr is a mv which contains iceberg transform expr.
         // translate whereExpr to scalarOperator and replace whereExpr's generatedColumnExpr to partition slotRef.
         ScalarOperator scalarOperator =
                 SqlToScalarOperatorTranslator.translate(whereExpr, expressionMapping, Lists.newArrayList(),
@@ -215,7 +237,7 @@ public class PartitionSelector {
         } else if (partitionInfo.isListPartition()) {
             ListPartitionInfo listPartitionInfo = (ListPartitionInfo) partitionInfo;
             selectedPartitionIds = getListPartitionIdsByExpr(tableName.getDb(), olapTable, listPartitionInfo,
-                    whereExpr, scalarOperator, exprToColumnIdxes, inputCells);
+                    whereExpr, scalarOperator, exprToColumnIdxes, isRecyclingCondition, inputCells);
         } else {
             throw new SemanticException("Unsupported partition type: " + partitionInfo.getType());
         }
@@ -270,7 +292,7 @@ public class PartitionSelector {
             }
         }
         return PartitionSelector.getPartitionIdsByExpr(context, tableName, olapTable,
-                whereExpr, false, inputCellsMap);
+                whereExpr, false, inputCellsMap, null);
     }
 
     private static List<String> getPartitionsByRetentionCondition(Database db,
@@ -432,12 +454,14 @@ public class PartitionSelector {
                                                         Expr whereExpr,
                                                         ScalarOperator scalarOperator,
                                                         Map<Expr, Integer> exprToColumnIdxes,
+                                                        boolean isRecyclingCondition,
                                                         Map<Long, PCell> inputCells) {
 
         List<Long> result = null;
         // try to prune partitions by FE's constant evaluation ability
         try {
-            result = getListPartitionIdsByExprV1(olapTable, listPartitionInfo, scalarOperator, inputCells);
+            result = getListPartitionIdsByExprV1(olapTable, listPartitionInfo, scalarOperator,
+                    isRecyclingCondition, inputCells);
             if (result != null) {
                 return result;
             }
@@ -454,12 +478,79 @@ public class PartitionSelector {
         }
     }
 
+    static class Recorder {
+        // used to record the state of eval result
+        private boolean isConstTrue = false;
+
+        public Recorder() {
+        }
+
+        public boolean isConstTrue() {
+            return isConstTrue;
+        }
+    }
+
+    /**
+     * Check if the eval result is satisfied and short-circuit the evaluation.
+     // TODO: refactor and move it to a common place
+     * @param rewriter : rewriter to rewrite the partition condition scalar operator by constant fold and so on
+     * @param replaceColumnRefRewriter: replace columnRef with literal
+     * @param scalarOperator : partition condition scalar operator
+     * @param isRecyclingCondition : true for recycling/dropping condition, false for retention condition.
+     * @param record : used to record the state of eval result
+     * @return : true if the eval result is satisfied, false if not satisfied, null if the eval result is not set.
+     */
+    private static Optional<Boolean> isEvalResultSatisfied(ScalarOperatorRewriter rewriter,
+                                                           ReplaceColumnRefRewriter replaceColumnRefRewriter,
+                                                           ScalarOperator scalarOperator,
+                                                           boolean isRecyclingCondition,
+                                                           Recorder record) {
+        ScalarOperator result = replaceColumnRefRewriter.rewrite(scalarOperator);
+        result = rewriter.rewrite(result, ScalarOperatorRewriter.DEFAULT_REWRITE_RULES);
+        if (!result.isConstant()) {
+            return Optional.empty();
+        }
+        if (isRecyclingCondition) {
+            // for recycling condition, keep partitions as less as possible
+            // T1, partitions:
+            //  p1: [1, 2]
+            //  p2: [2, 3]
+            // eg: alter table T1 drop partitions where p > 1, only choose p1 when all values are satisfied.
+            // p1: [1, 2] is not satisfied, so we need to return p2: [2, 3]
+            if (result.isConstantFalse()) {
+                record.isConstTrue = false;
+                return Optional.of(true);
+            } else if (result.isConstantTrue()) {
+                record.isConstTrue = true;
+            } else {
+                return Optional.empty();
+            }
+        } else {
+            // for retention condition, keep partitions as much as possible
+            // T1, partitions:
+            //  p1: [1, 2]
+            //  p2: [2, 3]
+            // eg: partition_retention_condition = 'p > 1', choose partition if it once is satisfied.
+            // p1: [1, 2]/[2, 3] are all satisfied, so we need to return p1/p2 both
+            if (result.isConstantFalse()) {
+                record.isConstTrue = false;
+            } else if (result.isConstantTrue()) {
+                record.isConstTrue = true;
+                return Optional.of(true);
+            } else {
+                return Optional.empty();
+            }
+        }
+        return Optional.of(false);
+    }
+
     /**
      * Fetch selected partition ids by using FE's constant evaluation ability.
      */
     private static List<Long> getListPartitionIdsByExprV1(OlapTable olapTable,
                                                           ListPartitionInfo listPartitionInfo,
                                                           ScalarOperator scalarOperator,
+                                                          boolean isRecyclingCondition,
                                                           Map<Long, PCell> inputCells) {
         // eval for each conjunct
         Map<ColumnRefOperator, Integer> colRefIdxMap = Maps.newHashMap();
@@ -476,84 +567,77 @@ public class PartitionSelector {
         List<Long> selectedPartitionIds = Lists.newArrayList();
         // single partition column
         Map<Long, List<LiteralExpr>> listPartitions = listPartitionInfo.getLiteralExprValues();
+        final Recorder recorder = new Recorder();
         for (Map.Entry<Long, List<LiteralExpr>> e : listPartitions.entrySet()) {
-            boolean isConstTrue = false;
             for (LiteralExpr literalExpr : e.getValue()) {
                 Map<ColumnRefOperator, ScalarOperator> replaceMap = Maps.newHashMap();
                 ConstantOperator replace = (ConstantOperator) SqlToScalarOperatorTranslator.translate(literalExpr);
                 replaceMap.put(usedPartitionColumnRefs.get(0), replace);
 
                 // replace columnRef with literal
-                ReplaceColumnRefRewriter replaceColumnRefRewriter = new ReplaceColumnRefRewriter(replaceMap);
-                ScalarOperator result = replaceColumnRefRewriter.rewrite(scalarOperator);
-                result = rewriter.rewrite(result, ScalarOperatorRewriter.FOLD_CONSTANT_RULES);
-
-                if (!result.isConstant()) {
+                final ReplaceColumnRefRewriter replaceColumnRefRewriter = new ReplaceColumnRefRewriter(replaceMap);
+                // check for each partition value
+                final Optional<Boolean> evalResultSatisfied = isEvalResultSatisfied(rewriter, replaceColumnRefRewriter,
+                        scalarOperator, isRecyclingCondition, recorder);
+                // if eval result is not set, return it directly
+                if (evalResultSatisfied == null || evalResultSatisfied.isEmpty()) {
                     return null;
                 }
-                if (result.isConstantFalse()) {
-                    isConstTrue = false;
+                // if eval result is satisfied, break the loop
+                if (evalResultSatisfied.get()) {
                     break;
-                } else if (result.isConstantTrue()) {
-                    isConstTrue = true;
-                } else {
-                    return null;
                 }
             }
-            if (isConstTrue) {
+            if (recorder.isConstTrue()) {
                 selectedPartitionIds.add(e.getKey());
             }
         }
         // multi partition columns
         Map<Long, List<List<LiteralExpr>>> multiListPartitions = listPartitionInfo.getMultiLiteralExprValues();
         for (Map.Entry<Long, List<List<LiteralExpr>>> e : multiListPartitions.entrySet()) {
-            boolean isConstTrue = false;
             for (List<LiteralExpr> values : e.getValue()) {
-                Map<ColumnRefOperator, ScalarOperator> replaceMap = buildReplaceMap(colRefIdxMap, values);
-                ReplaceColumnRefRewriter replaceColumnRefRewriter = new ReplaceColumnRefRewriter(replaceMap);
-                ScalarOperator result = replaceColumnRefRewriter.rewrite(scalarOperator);
-                result = rewriter.rewrite(result, ScalarOperatorRewriter.DEFAULT_REWRITE_RULES);
-                if (!result.isConstant()) {
+                final Map<ColumnRefOperator, ScalarOperator> replaceMap = buildReplaceMap(colRefIdxMap, values);
+                final ReplaceColumnRefRewriter replaceColumnRefRewriter = new ReplaceColumnRefRewriter(replaceMap);
+
+                // check for each partition value
+                final Optional<Boolean> evalResultSatisfied = isEvalResultSatisfied(rewriter, replaceColumnRefRewriter,
+                        scalarOperator, isRecyclingCondition, recorder);
+                // if eval result is not set, return it directly
+                if (evalResultSatisfied == null || evalResultSatisfied.isEmpty()) {
                     return null;
                 }
-                if (result.isConstantFalse()) {
-                    isConstTrue = false;
+                // if eval result is satisfied, break the loop
+                if (evalResultSatisfied.get()) {
                     break;
-                } else if (result.isConstantTrue()) {
-                    isConstTrue = true;
-                } else {
-                    return null;
                 }
             }
-            if (isConstTrue) {
+            if (recorder.isConstTrue()) {
                 selectedPartitionIds.add(e.getKey());
             }
         }
         if (!CollectionUtils.sizeIsEmpty(inputCells)) {
             for (Map.Entry<Long, PCell> e : inputCells.entrySet()) {
-                boolean isConstTrue = false;
                 PListCell pListCell = (PListCell) e.getValue();
                 for (List<String> values : pListCell.getPartitionItems()) {
-                    Map<ColumnRefOperator, ScalarOperator> replaceMap = buildReplaceMapWithCell(colRefIdxMap, values);
+                    final Map<ColumnRefOperator, ScalarOperator> replaceMap = buildReplaceMapWithCell(colRefIdxMap, values);
                     if (replaceMap == null) {
                         return null;
                     }
-                    ReplaceColumnRefRewriter replaceColumnRefRewriter = new ReplaceColumnRefRewriter(replaceMap);
-                    ScalarOperator result = replaceColumnRefRewriter.rewrite(scalarOperator);
-                    result = rewriter.rewrite(result, ScalarOperatorRewriter.DEFAULT_REWRITE_RULES);
-                    if (!result.isConstant()) {
+                    final ReplaceColumnRefRewriter replaceColumnRefRewriter = new ReplaceColumnRefRewriter(replaceMap);
+
+                    // check for each partition value
+                    final Optional<Boolean> evalResultSatisfied = isEvalResultSatisfied(rewriter, replaceColumnRefRewriter,
+                            scalarOperator, isRecyclingCondition, recorder);
+                    // if eval result is not set, return it directly
+                    if (evalResultSatisfied == null || evalResultSatisfied.isEmpty()) {
                         return null;
                     }
-                    if (result.isConstantFalse()) {
-                        isConstTrue = false;
+                    // if eval result is satisfied, break the loop
+                    if (evalResultSatisfied.get()) {
                         break;
-                    } else if (result.isConstantTrue()) {
-                        isConstTrue = true;
-                    } else {
-                        return null;
                     }
                 }
-                if (isConstTrue) {
+                if (recorder.isConstTrue()) {
                     selectedPartitionIds.add(e.getKey());
                 }
             }
@@ -587,7 +671,7 @@ public class PartitionSelector {
         String newWhereSql = newExpr.toSql();
         String sql = String.format(PARTITIONS_META_TEMPLATE, dbName, olapTable.getName(), newWhereSql);
         LOG.info("Get partition ids by sql: {}", sql);
-        List<TResultBatch> batch = RepoExecutor.getInstance().executeDQL(sql);
+        List<TResultBatch> batch = SimpleExecutor.getRepoExecutor().executeDQL(sql);
         List<String> partitionNames = deserializeLookupResult(batch);
         // multi items in the single partition is not supported yet since `JSON_QUERY_TEMPLATE` is constructed the first element.
         Set<Long> excludedPartitionIds = Sets.newHashSet();
@@ -650,7 +734,7 @@ public class PartitionSelector {
         }
 
         // extra check for materialized view
-        if (olapTable instanceof MaterializedView)  {
+        if (olapTable instanceof MaterializedView) {
             Pair<Boolean, String> result = OperatorFunctionChecker.onlyContainFEConstantFunctions(predicate);
             if (!result.first) {
                 throw new SemanticException("Retention condition must only contain FE constant functions for materialized" +

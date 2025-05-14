@@ -109,6 +109,15 @@ Status OlapScanNode::init(const TPlanNode& tnode, RuntimeState* state) {
         }
     }
 
+    if (tnode.olap_scan_node.__isset.enable_topn_filter_back_pressure &&
+        tnode.olap_scan_node.enable_topn_filter_back_pressure) {
+        _enable_topn_filter_back_pressure = true;
+        _back_pressure_max_rounds = tnode.olap_scan_node.back_pressure_max_rounds;
+        _back_pressure_num_rows = tnode.olap_scan_node.back_pressure_num_rows;
+        _back_pressure_throttle_time = tnode.olap_scan_node.back_pressure_throttle_time;
+        _back_pressure_throttle_time_upper_bound = tnode.olap_scan_node.back_pressure_throttle_time_upper_bound;
+    }
+
     _estimate_scan_and_output_row_bytes();
 
     return Status::OK();
@@ -910,7 +919,8 @@ pipeline::OpFactories OlapScanNode::decompose_to_pipeline(pipeline::PipelineBuil
                                                                        std::move(scan_ctx_factory));
     this->init_runtime_filter_for_operator(scan_op.get(), context, rc_rf_probe_collector);
 
-    return pipeline::decompose_scan_node_to_pipeline(scan_op, this, context);
+    auto ops = pipeline::decompose_scan_node_to_pipeline(scan_op, this, context);
+    return context->maybe_interpolate_debug_ops(runtime_state(), _id, ops);
 }
 
 } // namespace starrocks

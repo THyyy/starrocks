@@ -31,8 +31,7 @@ public class WarehousePEntryObject implements PEntryObject {
         return id;
     }
 
-    public static WarehousePEntryObject generate(GlobalStateMgr mgr,
-                                                 List<String> tokens) throws PrivilegeException {
+    public static WarehousePEntryObject generate(List<String> tokens) throws PrivilegeException {
         if (tokens.size() != 1) {
             throw new PrivilegeException("invalid object tokens, should have only one, token: " + tokens);
         }
@@ -40,8 +39,8 @@ public class WarehousePEntryObject implements PEntryObject {
         if (name.equals("*")) {
             return new WarehousePEntryObject(PrivilegeBuiltinConstants.ALL_WAREHOUSES_ID);
         } else {
-            WarehouseManager warehouseManagerEPack = mgr.getWarehouseMgr();
-            Warehouse warehouse = warehouseManagerEPack.getWarehouseAllowNull(name);
+            WarehouseManager warehouseMgr = GlobalStateMgr.getCurrentState().getWarehouseMgr();
+            Warehouse warehouse = warehouseMgr.getWarehouseAllowNull(name);
             if (warehouse == null) {
                 throw new PrivObjNotFoundException("cannot find warehouse: " + name);
             }
@@ -78,8 +77,8 @@ public class WarehousePEntryObject implements PEntryObject {
     }
 
     @Override
-    public boolean validate(GlobalStateMgr globalStateMgr) {
-        return globalStateMgr.getWarehouseMgr().getWarehouse(id) != null;
+    public boolean validate() {
+        return GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouseAllowNull(id) != null;
     }
 
     @Override
@@ -118,7 +117,7 @@ public class WarehousePEntryObject implements PEntryObject {
         if (getId() == PrivilegeBuiltinConstants.ALL_WAREHOUSES_ID) {
             return "ALL WAREHOUSES";
         } else {
-            Warehouse warehouse = GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouse(getId());
+            Warehouse warehouse = GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouseAllowNull(getId());
             if (warehouse == null) {
                 throw new MetaNotFoundException("Can't find warehouse : " + id);
             }

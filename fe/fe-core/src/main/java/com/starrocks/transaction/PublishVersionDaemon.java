@@ -53,6 +53,7 @@ import com.starrocks.lake.TxnInfoHelper;
 import com.starrocks.lake.Utils;
 import com.starrocks.lake.compaction.Quantiles;
 import com.starrocks.proto.DeleteTxnLogRequest;
+import com.starrocks.proto.DeleteTxnLogResponse;
 import com.starrocks.proto.TxnInfoPB;
 import com.starrocks.rpc.BrpcProxy;
 import com.starrocks.rpc.LakeService;
@@ -66,6 +67,7 @@ import com.starrocks.task.AgentTaskQueue;
 import com.starrocks.task.PublishVersionTask;
 import com.starrocks.thrift.TTaskType;
 import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -78,6 +80,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.stream.Collectors;
 import javax.validation.constraints.NotNull;
@@ -421,6 +424,7 @@ public class PublishVersionDaemon extends FrontendDaemon {
         GlobalTransactionMgr globalTransactionMgr = GlobalStateMgr.getCurrentState().getGlobalTransactionMgr();
         long txnId = txnState.getTransactionId();
         long dbId = txnState.getDbId();
+        LOG.info("start publish lake db:{} table:{} txn:{}", dbId, StringUtils.join(txnState.getTableIdList(), ","), txnId);
         Database db = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(dbId);
         if (db == null) {
             LOG.info("the database of transaction {} has been deleted", txnId);
@@ -542,7 +546,7 @@ public class PublishVersionDaemon extends FrontendDaemon {
                 Map<ComputeNode, List<Long>> nodeToTablets = new HashMap<>();
                 Utils.publishVersionBatch(publishTablets, txnInfos,
                         startVersion - 1, endVersion, compactionScores, nodeToTablets,
-                        warehouseId);
+                        warehouseId, null);
 
                 Quantiles quantiles = Quantiles.compute(compactionScores.values());
                 stateBatch.setCompactionScore(tableId, partitionId, quantiles);
@@ -562,7 +566,12 @@ public class PublishVersionDaemon extends FrontendDaemon {
             LakeService lakeService = BrpcProxy.getLakeService(node.getHost(), node.getBrpcPort());
             // just ignore the response, for we don't care the result of delete txn log
             // and vacuum will clan the txn log finally if it failed.
-            lakeService.deleteTxnLog(request);
+            // make sure sync wait for the RPC call to avoid too many RPC call existed in BE/CN side
+            Future<DeleteTxnLogResponse> responseFuture = lakeService.deleteTxnLog(request);
+            DeleteTxnLogResponse response = responseFuture.get();
+            if (response != null && response.status != null && response.status.statusCode != 0) {
+                LOG.warn("delete txn log request return with err: " + response.status.errorMsgs.get(0));
+            }
         } catch (Exception e) {
             LOG.warn("delete txn log error: " + e.getMessage());
         }
@@ -649,6 +658,8 @@ public class PublishVersionDaemon extends FrontendDaemon {
                 publishVersionData.addTransaction(state);
             }
         }
+        LOG.info("start publish lake batch db:{} table:{} txns:{}", dbId, tableId,
+                StringUtils.join(states.stream().map(TransactionState::getTransactionId).toArray(), ","));
 
         Database db = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(dbId);
 
@@ -762,6 +773,7 @@ public class PublishVersionDaemon extends FrontendDaemon {
 
         Locker locker = new Locker();
         locker.lockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(tableId), LockType.READ);
+        boolean enablePartitionAggregation = Config.enable_partition_aggregation;
         try {
             OlapTable table =
                     (OlapTable) GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(db.getId(), tableId);
@@ -770,6 +782,7 @@ public class PublishVersionDaemon extends FrontendDaemon {
                 LOG.info("Removed non-exist table {} from transaction {}. txn_id={}", tableId, txnLabel, txnId);
                 return true;
             }
+            enablePartitionAggregation = table.enablePartitionAggregation();
             long partitionId = partitionCommitInfo.getPhysicalPartitionId();
             PhysicalPartition partition = table.getPhysicalPartition(partitionId);
             if (partition == null) {
@@ -806,11 +819,21 @@ public class PublishVersionDaemon extends FrontendDaemon {
             }
             if (CollectionUtils.isNotEmpty(normalTablets)) {
                 Map<Long, Double> compactionScores = new HashMap<>();
-                Utils.publishVersion(normalTablets, txnInfo, baseVersion, txnVersion, compactionScores,
-                        warehouseId);
+                // Used to collect statistics when the partition is first imported
+                Map<Long, Long> tabletRowNums = new HashMap<>();
+                if (!enablePartitionAggregation) {
+                    Utils.publishVersion(normalTablets, txnInfo, baseVersion, txnVersion, compactionScores,
+                            warehouseId, tabletRowNums);
+                } else {
+                    Utils.aggregatePublishVersion(normalTablets, Lists.newArrayList(txnInfo), baseVersion, txnVersion, 
+                            compactionScores, null, warehouseId, tabletRowNums);
+                }
 
                 Quantiles quantiles = Quantiles.compute(compactionScores.values());
                 partitionCommitInfo.setCompactionScore(quantiles);
+                if (!tabletRowNums.isEmpty()) {
+                    partitionCommitInfo.getTabletIdToRowCountForPartitionFirstLoad().putAll(tabletRowNums);
+                }
             }
             return true;
         } catch (Throwable e) {

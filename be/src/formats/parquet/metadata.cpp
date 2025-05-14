@@ -23,6 +23,7 @@
 
 #include "formats/parquet/file_reader.h"
 #include "formats/parquet/schema.h"
+#include "formats/parquet/utils.h"
 #include "util/thrift_util.h"
 
 namespace starrocks::parquet {
@@ -432,6 +433,10 @@ bool ApplicationVersion::HasCorrectStatistics(const tparquet::ColumnMetaData& co
     return true;
 }
 
+bool ApplicationVersion::IsAlwaysCompressed() const {
+    return VersionLt(PARQUET_CPP_10353_FIXED_VERSION());
+}
+
 StatusOr<FileMetaDataPtr> FileMetaDataParser::get_file_metadata() {
     // return from split_context directly
     if (_scanner_ctx->split_context != nullptr) {
@@ -447,15 +452,17 @@ StatusOr<FileMetaDataPtr> FileMetaDataParser::get_file_metadata() {
         return file_metadata_ptr;
     }
 
-    DataCacheHandle cache_handle;
-    std::string metacache_key =
-            _build_metacache_key(_file->filename(), _datacache_options->modification_time, _file_size);
+    ObjectCacheHandle* cache_handle = nullptr;
+    std::string metacache_key = ParquetUtils::get_file_cache_key(CacheType::META, _file->filename(),
+                                                                 _datacache_options->modification_time, _file_size);
     {
         SCOPED_RAW_TIMER(&_scanner_ctx->stats->footer_cache_read_ns);
-        Status st = _cache->read_object(metacache_key, &cache_handle);
+        Status st = _cache->lookup(metacache_key, &cache_handle);
         if (st.ok()) {
+            auto file_metadata = *(static_cast<const FileMetaDataPtr*>(_cache->value(cache_handle)));
             _scanner_ctx->stats->footer_cache_read_count += 1;
-            return *(static_cast<const FileMetaDataPtr*>(cache_handle.ptr()));
+            _cache->release(cache_handle);
+            return file_metadata;
         }
     }
 
@@ -464,22 +471,23 @@ StatusOr<FileMetaDataPtr> FileMetaDataParser::get_file_metadata() {
     RETURN_IF_ERROR(_parse_footer(&file_metadata, &file_metadata_size));
     if (file_metadata_size > 0) {
         // cache does not understand shared ptr at all.
-        // so we have to new a object to hold this shared ptr.
+        // so we have to new an object to hold this shared ptr.
         FileMetaDataPtr* capture = new FileMetaDataPtr(file_metadata);
         Status st = Status::InternalError("write footer cache failed");
-        DeferOp op([&st, this, capture, file_metadata_size]() {
+        DeferOp op([&st, this, capture, file_metadata_size, &cache_handle]() {
             if (st.ok()) {
                 _scanner_ctx->stats->footer_cache_write_bytes += file_metadata_size;
                 _scanner_ctx->stats->footer_cache_write_count += 1;
+                _cache->release(cache_handle);
             } else {
                 _scanner_ctx->stats->footer_cache_write_fail_count += 1;
                 delete capture;
             }
         });
-        auto deleter = [capture]() { delete capture; };
-        WriteCacheOptions options;
+        auto deleter = [](const CacheKey& key, void* value) { delete (FileMetaDataPtr*)value; };
+        ObjectCacheWriteOptions options;
         options.evict_probability = _datacache_options->datacache_evict_probability;
-        st = _cache->write_object(metacache_key, capture, file_metadata_size, deleter, &cache_handle, &options);
+        st = _cache->insert(metacache_key, capture, file_metadata_size, deleter, &cache_handle, &options);
     } else {
         LOG(ERROR) << "Parsing unexpected parquet file metadata size";
     }
@@ -560,29 +568,6 @@ StatusOr<uint32_t> FileMetaDataParser::_parse_metadata_length(const std::vector<
                 metadata_length));
     }
     return metadata_length;
-}
-
-std::string FileMetaDataParser::_build_metacache_key(const std::string& filename, int64_t modification_time,
-                                                     uint64_t file_size) {
-    std::string metacache_key;
-    metacache_key.resize(14);
-    char* data = metacache_key.data();
-    const std::string footer_suffix = "ft";
-    uint64_t hash_value = HashUtil::hash64(filename.data(), filename.size(), 0);
-    memcpy(data, &hash_value, sizeof(hash_value));
-    memcpy(data + 8, footer_suffix.data(), footer_suffix.length());
-    // The modification time is more appropriate to indicate the different file versions.
-    // While some data source, such as Hudi, have no modification time because their files
-    // cannot be overwritten. So, if the modification time is unsupported, we use file size instead.
-    // Also, to reduce memory usage, we only use the high four bytes to represent the second timestamp.
-    if (modification_time > 0) {
-        uint32_t mtime_s = (modification_time >> 9) & 0x00000000FFFFFFFF;
-        memcpy(data + 10, &mtime_s, sizeof(mtime_s));
-    } else {
-        uint32_t size = file_size;
-        memcpy(data + 10, &size, sizeof(size));
-    }
-    return metacache_key;
 }
 
 // reference both be/src/formats/parquet/column_converter.cpp

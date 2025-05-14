@@ -72,6 +72,12 @@ public:
 
     // Checks if the Version has the correct statistics for a given column
     bool HasCorrectStatistics(const tparquet::ColumnMetaData& column_meta, const SortOrder& sort_order) const;
+
+    // ARROW-17100: [C++][Parquet] Fix backwards compatibility for ParquetV2 data pages written prior to 3.0.0 per ARROW-10353 #13665
+    // https://github.com/apache/arrow/pull/13665/files
+    // Prior to Arrow 3.0.0, is_compressed was always set to false in column headers,
+    // even if compression was used. See ARROW-17100.
+    bool IsAlwaysCompressed() const;
 };
 
 // Class corresponding to FileMetaData in thrift
@@ -106,7 +112,7 @@ using FileMetaDataPtr = std::shared_ptr<FileMetaData>;
 // 2. if DataCache is enabled, retrieve FileMetaData from DataCache. Otherwise, parse FileMetaData normally
 class FileMetaDataParser {
 public:
-    FileMetaDataParser(RandomAccessFile* file, const HdfsScannerContext* scanner_context, BlockCache* cache,
+    FileMetaDataParser(RandomAccessFile* file, const HdfsScannerContext* scanner_context, ObjectCache* cache,
                        const DataCacheOptions* datacache_options, uint64_t file_size)
             : _file(file),
               _scanner_ctx(scanner_context),
@@ -122,7 +128,7 @@ private:
     static std::string _build_metacache_key(const std::string& filename, int64_t modification_time, uint64_t file_size);
     RandomAccessFile* _file = nullptr;
     const HdfsScannerContext* _scanner_ctx = nullptr;
-    BlockCache* _cache = nullptr;
+    ObjectCache* _cache = nullptr;
     const DataCacheOptions* _datacache_options = nullptr;
     uint64_t _file_size = 0;
 

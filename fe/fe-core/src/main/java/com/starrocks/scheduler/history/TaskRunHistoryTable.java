@@ -20,7 +20,7 @@ import com.starrocks.cluster.ClusterNamespace;
 import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.util.DateUtils;
-import com.starrocks.load.pipe.filelist.RepoExecutor;
+import com.starrocks.qe.SimpleExecutor;
 import com.starrocks.scheduler.ExecuteOption;
 import com.starrocks.scheduler.TaskRun;
 import com.starrocks.scheduler.persist.TaskRunStatus;
@@ -32,7 +32,10 @@ import org.apache.commons.collections4.ListUtils;
 import org.apache.commons.lang3.StringEscapeUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.util.Strings;
+import org.apache.velocity.VelocityContext;
+import org.apache.velocity.app.VelocityEngine;
 
+import java.io.StringWriter;
 import java.text.MessageFormat;
 import java.time.ZoneId;
 import java.util.Collections;
@@ -48,7 +51,7 @@ import java.util.stream.Collectors;
  */
 public class TaskRunHistoryTable {
 
-    public static final int INSERT_BATCH_SIZE = 128;
+    public static final int INSERT_BATCH_SIZE = 32;
     private static final int DEFAULT_RETENTION_DAYS = 7;
     public static final String DATABASE_NAME = StatsConstants.STATISTICS_DB_NAME;
     public static final String TABLE_NAME = "task_run_history";
@@ -91,6 +94,13 @@ public class TaskRunHistoryTable {
     private static final String INSERT_SQL_VALUE = "({0}, {1}, {2}, {3}, {4}, {5}, {6}, {7})";
     private static final String LOOKUP =
             "SELECT history_content_json " + "FROM " + TABLE_FULL_NAME + " WHERE ";
+
+    private static final VelocityEngine DEFAULT_VELOCITY_ENGINE;
+
+    static {
+        DEFAULT_VELOCITY_ENGINE = new VelocityEngine();
+        DEFAULT_VELOCITY_ENGINE.setProperty(VelocityEngine.RUNTIME_LOG_REFERENCE_LOG_INVALID, false);
+    }
 
     private static final TableKeeper KEEPER =
             new TableKeeper(DATABASE_NAME, TABLE_NAME, CREATE_TABLE,
@@ -142,7 +152,7 @@ public class TaskRunHistoryTable {
             }).collect(Collectors.joining(", "));
 
             String sql = insert + values;
-            RepoExecutor.getInstance().executeDML(sql);
+            SimpleExecutor.getRepoExecutor().executeDML(sql);
         }
     }
 
@@ -200,8 +210,11 @@ public class TaskRunHistoryTable {
             predicates.add(" task_state = " + Strings.quote(params.getState()));
         }
         sql += Joiner.on(" AND ").join(predicates);
+        if (params.isSetPagination() && params.getPagination().getLimit() > 0) {
+            sql += " LIMIT " + params.getPagination().getLimit();
+        }
 
-        List<TResultBatch> batch = RepoExecutor.getInstance().executeDQL(sql);
+        List<TResultBatch> batch = SimpleExecutor.getRepoExecutor().executeDQL(sql);
         List<TaskRunStatus> result = TaskRunStatus.fromResultBatch(batch);
         // sort results by create time desc to make the result more stable.
         Collections.sort(result, TaskRunStatus.COMPARATOR_BY_CREATE_TIME_DESC);
@@ -220,10 +233,54 @@ public class TaskRunHistoryTable {
         }
 
         String sql = LOOKUP + Joiner.on(" AND ").join(predicates);
-        List<TResultBatch> batch = RepoExecutor.getInstance().executeDQL(sql);
+        List<TResultBatch> batch = SimpleExecutor.getRepoExecutor().executeDQL(sql);
         List<TaskRunStatus> result = TaskRunStatus.fromResultBatch(batch);
         // sort results by create time desc to make the result more stable.
         Collections.sort(result, TaskRunStatus.COMPARATOR_BY_CREATE_TIME_DESC);
         return result;
+    }
+
+    public List<TaskRunStatus> lookupLastJobOfTasks(String dbName, Set<String> taskNames) {
+        final String template =
+                "WITH MaxStartRunID AS (" +
+                        "    SELECT " +
+                        "       task_name, " +
+                        "       cast(history_content_json->'startTaskRunId' as string) start_run_id" +
+                        "    FROM $tableName " +
+                        "    WHERE (task_name, create_time) IN (" +
+                        "            SELECT task_name, MAX(create_time)" +
+                        "            FROM $tableName" +
+                        "            WHERE $taskFilter" +
+                        "            GROUP BY task_name" +
+                        "    )" +
+                        " )" +
+                        " SELECT t.history_content_json" +
+                        " FROM $tableName t" +
+                        " JOIN MaxStartRunID msr" +
+                        "   ON t.task_name = msr.task_name" +
+                        "   AND cast(t.history_content_json->'startTaskRunId' as string) = msr.start_run_id" +
+                        " ORDER BY t.create_time DESC";
+
+        List<String> predicates = Lists.newArrayList("TRUE");
+        if (StringUtils.isNotEmpty(dbName)) {
+            predicates.add(" get_json_string(" + CONTENT_COLUMN + ", 'dbName') = "
+                    + Strings.quote(ClusterNamespace.getFullName(dbName)));
+        }
+        if (CollectionUtils.isNotEmpty(taskNames)) {
+            String values = taskNames.stream().sorted().map(Strings::quote).collect(Collectors.joining(","));
+            predicates.add(" task_name IN (" + values + ")");
+        }
+        String where = Joiner.on(" AND ").join(predicates);
+
+        VelocityContext context = new VelocityContext();
+        context.put("tableName", TABLE_FULL_NAME);
+        context.put("taskFilter", where);
+
+        StringWriter sw = new StringWriter();
+        DEFAULT_VELOCITY_ENGINE.evaluate(context, sw, "", template);
+        String sql = sw.toString();
+
+        List<TResultBatch> batch = SimpleExecutor.getRepoExecutor().executeDQL(sql);
+        return TaskRunStatus.fromResultBatch(batch);
     }
 }

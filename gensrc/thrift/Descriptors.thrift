@@ -160,7 +160,7 @@ enum TSchemaTableType {
     SCH_BE_LOGS,
     SCH_BE_BVARS,
     SCH_BE_CLOUD_NATIVE_COMPACTIONS,
-    
+
     STARROCKS_ROLE_EDGES,
     STARROCKS_GRANT_TO_ROLES,
     STARROCKS_GRANT_TO_USERS,
@@ -178,6 +178,15 @@ enum TSchemaTableType {
     
     SCH_COLUMN_STATS_USAGE,
     SCH_ANALYZE_STATUS,
+
+    SCH_CLUSTER_SNAPSHOTS,
+    SCH_CLUSTER_SNAPSHOT_JOBS,
+
+    SCH_KEYWORDS,
+    SCH_APPLICABLE_ROLES,
+
+    SCH_WAREHOUSE_METRICS,
+    SCH_WAREHOUSE_QUERIES,
 }
 
 enum THdfsCompression {
@@ -571,6 +580,9 @@ struct TPaimonTable {
 
     // timezone
     3: optional string time_zone
+
+    // reuse iceberg schema here, used to support schema evolution
+    4: optional TIcebergSchema paimon_schema
 }
 
 struct TDeltaLakeTable {

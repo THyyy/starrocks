@@ -105,7 +105,7 @@ CREATE TABLE test_tbl (id INT, city STRING);
 
 2. Configure and run the Kafka Connect.
 
-   1. Configure the Kafka Connect. In the configuration file **config/connect-standalone.properties** in the **config** directory, configure the following parameters. For more parameters and descriptions, see [Running Kafka Connect](https://kafka.apache.org/documentation.html#connect_running).
+   1. Configure the Kafka Connect. In the configuration file **config/connect-standalone.properties** in the **config** directory, configure the following parameters. For more parameters and descriptions, see [Running Kafka Connect](https://kafka.apache.org/documentation.html#connect_running). Note that the following examples use starrocks-kafka-connector version `1.0.3`. If you use a newer version, you need to make corresponding changes.
 
         ```yaml
         # The addresses of Kafka brokers. Multiple addresses of Kafka brokers need to be separated by commas (,).
@@ -639,7 +639,7 @@ DISTRIBUTED BY hash(id) buckets 1
 PROPERTIES (
 "bucket_size" = "4294967296",
 "in_memory" = "false",
-"enable_persistent_index" = "false",
+"enable_persistent_index" = "true",
 "replicated_storage" = "true",
 "fast_schema_evolution" = "true"
 );

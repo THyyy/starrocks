@@ -369,7 +369,9 @@ void run_clone_task(const std::shared_ptr<CloneAgentTaskRequest>& agent_task_req
             LOG(WARNING) << "fail to get dest store. path_hash:" << clone_req.dest_path_hash;
             status_code = TStatusCode::RUNTIME_ERROR;
         } else {
-            EngineStorageMigrationTask engine_task(clone_req.tablet_id, clone_req.schema_hash, dest_store);
+            bool need_rebuild_pk_index = clone_req.__isset.need_rebuild_pk_index && clone_req.need_rebuild_pk_index;
+            EngineStorageMigrationTask engine_task(clone_req.tablet_id, clone_req.schema_hash, dest_store,
+                                                   need_rebuild_pk_index);
             Status res = StorageEngine::instance()->execute_task(&engine_task);
             if (!res.ok()) {
                 status_code = TStatusCode::RUNTIME_ERROR;
@@ -473,7 +475,10 @@ void run_storage_medium_migrate_task(const std::shared_ptr<StorageMediumMigrateT
             break;
         }
 
-        EngineStorageMigrationTask engine_task(tablet_id, schema_hash, stores[0]);
+        bool need_rebuild_pk_index = storage_medium_migrate_req.__isset.need_rebuild_pk_index &&
+                                     storage_medium_migrate_req.need_rebuild_pk_index;
+
+        EngineStorageMigrationTask engine_task(tablet_id, schema_hash, stores[0], need_rebuild_pk_index);
         Status res = StorageEngine::instance()->execute_task(&engine_task);
         if (!res.ok()) {
             LOG(WARNING) << "storage media migrate failed. status: " << res
@@ -999,7 +1004,10 @@ void run_remote_snapshot_task(const std::shared_ptr<RemoteSnapshotAgentTaskReque
     MemTracker* prev_tracker = tls_thread_status.set_mem_tracker(GlobalEnv::GetInstance()->replication_mem_tracker());
     DeferOp op([prev_tracker] { tls_thread_status.set_mem_tracker(prev_tracker); });
 
-    const TRemoteSnapshotRequest& remote_snapshot_req = agent_task_req->task_req;
+    TRemoteSnapshotRequest& remote_snapshot_req = agent_task_req->task_req;
+    if (remote_snapshot_req.data_version == 0) {
+        remote_snapshot_req.__set_data_version(remote_snapshot_req.visible_version);
+    }
 
     // Return result to fe
     TStatus task_status;
@@ -1046,7 +1054,10 @@ void run_replicate_snapshot_task(const std::shared_ptr<ReplicateSnapshotAgentTas
     MemTracker* prev_tracker = tls_thread_status.set_mem_tracker(GlobalEnv::GetInstance()->replication_mem_tracker());
     DeferOp op([prev_tracker] { tls_thread_status.set_mem_tracker(prev_tracker); });
 
-    const TReplicateSnapshotRequest& replicate_snapshot_req = agent_task_req->task_req;
+    TReplicateSnapshotRequest& replicate_snapshot_req = agent_task_req->task_req;
+    if (replicate_snapshot_req.data_version == 0) {
+        replicate_snapshot_req.__set_data_version(replicate_snapshot_req.visible_version);
+    }
 
     TStatusCode::type status_code = TStatusCode::OK;
     std::vector<std::string> error_msgs;

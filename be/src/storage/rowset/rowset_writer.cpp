@@ -124,7 +124,7 @@ Status RowsetWriter::init() {
     _writer_options.global_dicts = _context.global_dicts != nullptr ? _context.global_dicts : nullptr;
     _writer_options.referenced_column_ids = _context.referenced_column_ids;
     _writer_options.is_compaction = _context.is_compaction;
-
+    _writer_options.flat_json_config = _context.flat_json_config;
     if (_context.tablet_schema->keys_type() == KeysType::PRIMARY_KEYS &&
         (_context.is_partial_update || !_context.merge_condition.empty() || _context.miss_auto_increment_column)) {
         _rowset_txn_meta_pb = std::make_unique<RowsetTxnMetaPB>();
@@ -684,8 +684,8 @@ Status HorizontalRowsetWriter::flush_chunk_with_deletes(const Chunk& upserts, co
             wopts.encryption_info = pair.info;
             encryption_meta = std::move(pair.encryption_meta);
         }
-        ASSIGN_OR_RETURN(auto wfile, _fs->new_writable_file(Rowset::segment_del_file_path(
-                                             _context.rowset_path_prefix, _context.rowset_id, _num_delfile)));
+        auto file_path = Rowset::segment_del_file_path(_context.rowset_path_prefix, _context.rowset_id, _num_delfile);
+        ASSIGN_OR_RETURN(auto wfile, _fs->new_writable_file(wopts, file_path));
         size_t sz = serde::ColumnArraySerde::max_serialized_size(deletes);
         std::vector<uint8_t> content(sz);
         if (serde::ColumnArraySerde::serialize(deletes, content.data()) == nullptr) {

@@ -29,6 +29,8 @@ import com.starrocks.proto.AbortCompactionRequest;
 import com.starrocks.proto.AbortCompactionResponse;
 import com.starrocks.proto.AbortTxnRequest;
 import com.starrocks.proto.AbortTxnResponse;
+import com.starrocks.proto.AggregateCompactRequest;
+import com.starrocks.proto.AggregatePublishVersionRequest;
 import com.starrocks.proto.CompactRequest;
 import com.starrocks.proto.CompactResponse;
 import com.starrocks.proto.DeleteDataRequest;
@@ -74,6 +76,8 @@ import com.starrocks.proto.PTriggerProfileReportResult;
 import com.starrocks.proto.PUniqueId;
 import com.starrocks.proto.PUpdateFailPointStatusRequest;
 import com.starrocks.proto.PUpdateFailPointStatusResponse;
+import com.starrocks.proto.PUpdateTransactionStateRequest;
+import com.starrocks.proto.PUpdateTransactionStateResponse;
 import com.starrocks.proto.PublishLogVersionBatchRequest;
 import com.starrocks.proto.PublishLogVersionRequest;
 import com.starrocks.proto.PublishLogVersionResponse;
@@ -126,6 +130,8 @@ import com.starrocks.thrift.TExportTaskRequest;
 import com.starrocks.thrift.TFetchDataParams;
 import com.starrocks.thrift.TFetchDataResult;
 import com.starrocks.thrift.TFinishTaskRequest;
+import com.starrocks.thrift.TGetTabletsInfoRequest;
+import com.starrocks.thrift.TGetTabletsInfoResult;
 import com.starrocks.thrift.THeartbeatResult;
 import com.starrocks.thrift.TMasterInfo;
 import com.starrocks.thrift.TMasterResult;
@@ -893,6 +899,13 @@ public class PseudoBackend {
             return null;
         }
 
+        @Override
+        public TGetTabletsInfoResult get_tablets_info(TGetTabletsInfoRequest request) throws TException {
+            TGetTabletsInfoResult result = new TGetTabletsInfoResult(new TStatus(TStatusCode.OK));
+            result.setReport_version(reportVersion.get());
+            result.setTablets(tabletManager.getAllTabletInfo());
+            return result;
+        }
     }
 
     private class PseudoPBackendService implements PBackendService {
@@ -1096,6 +1109,11 @@ public class PseudoBackend {
         public Future<PExecShortCircuitResult> execShortCircuit(PExecShortCircuitRequest request) {
             return null;
         }
+
+        @Override
+        public Future<PUpdateTransactionStateResponse> updateTransactionState(PUpdateTransactionStateRequest request) {
+            throw new org.apache.commons.lang.NotImplementedException("TODO");
+        }
     }
 
     public static class PseudoLakeService implements LakeService {
@@ -1111,6 +1129,11 @@ public class PseudoBackend {
 
         @Override
         public Future<CompactResponse> compact(CompactRequest request) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public Future<CompactResponse> aggregateCompact(AggregateCompactRequest request) {
             return CompletableFuture.completedFuture(null);
         }
 
@@ -1176,6 +1199,11 @@ public class PseudoBackend {
 
         @Override
         public Future<VacuumResponse> vacuum(VacuumRequest request) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public Future<PublishVersionResponse> aggregatePublishVersion(AggregatePublishVersionRequest request) {
             return CompletableFuture.completedFuture(null);
         }
     }

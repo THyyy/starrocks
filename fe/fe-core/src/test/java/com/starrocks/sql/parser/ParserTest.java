@@ -41,6 +41,7 @@ import org.antlr.v4.runtime.CharStreams;
 import org.antlr.v4.runtime.CommonTokenStream;
 import org.antlr.v4.runtime.atn.PredictionMode;
 import org.junit.Assert;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -466,16 +467,16 @@ class ParserTest {
 
         List<String> expects = Lists.newArrayList();
         expects.add("SELECT *\n" +
-                "FROM `t` PIVOT (sum(v1)\n" +
-                "FOR v2 IN (1, 2, 3)\n" +
+                "FROM `t` PIVOT (sum(v1) " +
+                "FOR v2 IN (1, 2, 3)" +
                 ")");
         expects.add("SELECT *\n" +
-                "FROM `t` PIVOT (sum(v1) AS s1\n" +
-                "FOR (v2, v3) IN ((1, 2) AS a, (3, 4) AS b, (5, 6) AS c)\n" +
+                "FROM `t` PIVOT (sum(v1) AS s1 " +
+                "FOR (v2, v3) IN ((1, 2) AS a, (3, 4) AS b, (5, 6) AS c)" +
                 ")");
         expects.add("SELECT *\n" +
-                "FROM `t` PIVOT (sum(v1) AS s1, count(v2) AS c1, avg(v3) AS c3\n" +
-                "FOR (v2, v3) IN ((1, 2) AS a, (3, 4) AS b, (5, 6) AS c)\n" +
+                "FROM `t` PIVOT (sum(v1) AS s1, count(v2) AS c1, avg(v3) AS c3 " +
+                "FOR (v2, v3) IN ((1, 2) AS a, (3, 4) AS b, (5, 6) AS c)" +
                 ")");
         for (String sql : sqls) {
             try {
@@ -576,6 +577,17 @@ class ParserTest {
         arguments.add(Arguments.of("create MATERIALIZED VIEW  as select * from (t1 join t2);",
                 "the most similar input is {a legal identifier}."));
         return arguments.stream();
+    }
+
+    @Test
+    public void testTranslateFunction() {
+        String sql = "select translate('abcabc', 'ab', '12') as test;";
+        SessionVariable sessionVariable = new SessionVariable();
+        try {
+            SqlParser.parse(sql, sessionVariable);
+        } catch (Exception e) {
+            Assertions.fail("sql should success. errMsg: " +  e.getMessage());
+        }
     }
 
 }

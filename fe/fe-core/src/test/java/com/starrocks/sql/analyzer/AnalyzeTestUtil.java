@@ -17,6 +17,7 @@ package com.starrocks.sql.analyzer;
 import com.starrocks.common.Config;
 import com.starrocks.common.ErrorReportException;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.RunMode;
 import com.starrocks.sql.ast.QueryStatement;
 import com.starrocks.sql.ast.SetStmt;
 import com.starrocks.sql.ast.StatementBase;
@@ -28,9 +29,22 @@ import com.starrocks.utframe.UtFrameUtils;
 import org.junit.Assert;
 
 public class AnalyzeTestUtil {
-    private static ConnectContext connectContext;
-    private static StarRocksAssert starRocksAssert;
-    private static String DB_NAME = "test";
+    protected static ConnectContext connectContext;
+    protected static StarRocksAssert starRocksAssert;
+    protected static String DB_NAME = "test";
+
+    public static void initWithoutTableAndDb(RunMode runMode) throws Exception {
+        Config.enable_experimental_rowstore = true;
+        // create connect context
+        if (runMode == RunMode.SHARED_DATA) {
+            UtFrameUtils.createMinStarRocksCluster(RunMode.SHARED_DATA);
+        } else {
+            UtFrameUtils.createMinStarRocksCluster();
+        }
+        connectContext = UtFrameUtils.createDefaultCtx();
+        starRocksAssert = new StarRocksAssert(connectContext);
+        starRocksAssert.withDatabase(DB_NAME).useDatabase(DB_NAME);
+    }
 
     public static void init() throws Exception {
         Config.enable_experimental_rowstore = true;
@@ -314,6 +328,25 @@ public class AnalyzeTestUtil {
                 "PROPERTIES (\n" +
                 "\"replication_num\" = \"1\",\n" +
                 "\"storage_type\" = \"column_with_row\"" +
+                ");");
+        starRocksAssert.withTable("CREATE TABLE test.auto_tbl1 (\n" +
+                "  col1 varchar(100),\n" +
+                "  col2 varchar(100),\n" +
+                "  col3 bigint\n" +
+                ") ENGINE=OLAP\n" +
+                "PRIMARY KEY (col1)\n" +
+                "PARTITION BY (col1)\n" +
+                "DISTRIBUTED BY HASH(col1) BUCKETS 5\n" +
+                "PROPERTIES (\n" +
+                "\"replication_num\" = \"1\"\n" +
+                ");");
+        starRocksAssert.withTable("CREATE TABLE test.test_exclude ( \n" + 
+                " id INT, \n" +
+                " name VARCHAR(50), \n" +
+                " age INT, \n" +
+                " email VARCHAR(100)) \n" +
+                " DUPLICATE KEY(id) PROPERTIES ( \n" +
+                "\"replication_num\" = \"1\"\n" +
                 ");");
     }
 

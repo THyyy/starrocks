@@ -39,8 +39,6 @@
 
 #include "common/logging.h"
 #include "gutil/strings/substitute.h"
-#include "runtime/mem_pool.h"
-#include "runtime/string_value.h"
 #include "simd/multi_version.h"
 #include "util/coding.h"
 #include "util/phmap/phmap.h"
@@ -170,7 +168,7 @@ void HyperLogLog::update(uint64_t hash_value) {
     }
 }
 
-MFV_AVX512(void merge_registers_impl(uint8_t* dest, const uint8_t* other) {
+MFV_AVX512BW(void merge_registers_impl(uint8_t* dest, const uint8_t* other) {
     constexpr int SIMD_SIZE = sizeof(__m512i);
     constexpr int loop = HLL_REGISTERS_COUNT / SIMD_SIZE;
     assert(HLL_REGISTERS_COUNT % SIMD_SIZE == 0);
@@ -590,7 +588,7 @@ std::string HyperLogLog::to_string() const {
                                    estimate_cardinality(), _type);
     case HLL_DATA_SPARSE:
     case HLL_DATA_FULL: {
-        return strings::Substitute("cardinality:$1\ntype:$2", estimate_cardinality(), _type);
+        return strings::Substitute("cardinality:$0\ntype:$1", estimate_cardinality(), _type);
     }
     default:
         return {};

@@ -40,6 +40,7 @@ import com.sleepycat.je.rep.MemberNotFoundException;
 import com.sleepycat.je.rep.ReplicaStateException;
 import com.sleepycat.je.rep.UnknownMasterException;
 import com.sleepycat.je.rep.util.ReplicationGroupAdmin;
+import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.Pair;
@@ -49,11 +50,13 @@ import com.starrocks.journal.JournalException;
 import com.starrocks.journal.JournalInconsistentException;
 import com.starrocks.journal.bdbje.BDBEnvironment;
 import com.starrocks.persist.EditLog;
-import com.starrocks.persist.ImageFormatVersion;
 import com.starrocks.persist.ImageWriter;
 import com.starrocks.persist.OperationType;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.ModifyFrontendAddressClause;
+import com.starrocks.sql.ast.UserIdentity;
 import com.starrocks.system.Frontend;
+import com.starrocks.utframe.StarRocksAssert;
 import com.starrocks.utframe.UtFrameUtils;
 import mockit.Expectations;
 import mockit.Mock;
@@ -65,6 +68,9 @@ import org.junit.Test;
 import org.mockito.Mockito;
 
 import java.lang.reflect.Field;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -81,7 +87,7 @@ public class GlobalStateMgrTest {
     public void testSaveLoadHeader() throws Exception {
         GlobalStateMgr globalStateMgr = GlobalStateMgr.getCurrentState();
 
-        ImageWriter imageWriter = new ImageWriter("", ImageFormatVersion.v2, 0);
+        ImageWriter imageWriter = new ImageWriter("", 0);
         // test json-format header
         UtFrameUtils.PseudoImage image2 = new UtFrameUtils.PseudoImage();
         imageWriter.setOutputStream(image2.getDataOutputStream());
@@ -245,6 +251,7 @@ public class GlobalStateMgrTest {
         private final boolean throwException;
 
         public MyGlobalStateMgr(boolean throwException) {
+            super();
             this.throwException = throwException;
         }
 
@@ -268,7 +275,7 @@ public class GlobalStateMgrTest {
         NodeMgr nodeMgr = globalStateMgr.getNodeMgr();
         Assert.assertTrue(nodeMgr.isVersionAndRoleFilesNotExist());
         try {
-            globalStateMgr.initialize(new String[0]);
+            globalStateMgr.initialize(null);
         } catch (Exception e) {
             Assert.assertTrue(e instanceof UnsupportedOperationException);
             Assert.assertEquals(MyGlobalStateMgr.ERROR_MESSAGE, e.getMessage());
@@ -282,7 +289,7 @@ public class GlobalStateMgrTest {
         NodeMgr nodeMgr = globalStateMgr.getNodeMgr();
         Assert.assertTrue(nodeMgr.isVersionAndRoleFilesNotExist());
         try {
-            globalStateMgr.initialize(new String[0]);
+            globalStateMgr.initialize(null);
         } catch (Exception e) {
             Assert.fail("No exception is expected here.");
         }
@@ -299,7 +306,7 @@ public class GlobalStateMgrTest {
         GlobalStateMgr globalStateMgr = new MyGlobalStateMgr(true, nodeMgr);
         Assert.assertTrue(nodeMgr.isVersionAndRoleFilesNotExist());
         try {
-            globalStateMgr.initialize(new String[0]);
+            globalStateMgr.initialize(null);
         } catch (Exception e) {
             Assert.assertTrue(e instanceof UnsupportedOperationException);
             Assert.assertEquals(MyGlobalStateMgr.ERROR_MESSAGE, e.getMessage());
@@ -309,5 +316,49 @@ public class GlobalStateMgrTest {
             Assert.assertTrue(suppressedExceptions[0] instanceof RuntimeException);
             Assert.assertEquals(removeFileErrorMessage, suppressedExceptions[0].getMessage());
         }
+    }
+
+    @Test
+    public void testReloadTables() throws Exception {
+        ConnectContext ctx = UtFrameUtils.initCtxForNewPrivilege(UserIdentity.ROOT);
+        UtFrameUtils.createMinStarRocksCluster();
+        UtFrameUtils.setUpForPersistTest();
+        GlobalStateMgr currentState = GlobalStateMgr.getCurrentState();
+        StarRocksAssert starRocksAssert = new StarRocksAssert();
+
+        currentState.getLocalMetastore().createDb("db1");
+        currentState.getLocalMetastore().createDb("db2");
+        {
+            String sql = "create table db1.t1(c1 int not null, c2 int) " +
+                    "properties('replication_num'='1', 'unique_constraints'='c1') ";
+            starRocksAssert.withTable(sql);
+        }
+        {
+            String sql = "create table db2.t1(c1 int, c2 int) properties('replication_num'='1'," +
+                    "'foreign_key_constraints'='(c1) REFERENCES db1.t1(c1)')";
+            starRocksAssert.withTable(sql);
+        }
+
+        // move image file
+        String imagePath = currentState.dumpImage();
+        Path targetPath = Path.of(Config.meta_dir, GlobalStateMgr.IMAGE_DIR, "/v2",
+                Path.of(imagePath).getFileName().toString());
+        Files.move(Path.of(imagePath), targetPath);
+        // Move all checksum files instead of a single file
+        Path checksumDir = Path.of(Config.meta_dir);
+        Path checksumTargetDir = Path.of(Config.meta_dir, GlobalStateMgr.IMAGE_DIR, "/v2");
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(checksumDir, "checksum.*")) {
+            for (Path file : stream) {
+                Path target = checksumTargetDir.resolve(file.getFileName());
+                Files.move(file, target);
+            }
+        }
+
+        GlobalStateMgr newState = new MyGlobalStateMgr(false);
+        newState.loadImage();
+        Table table = newState.getLocalMetastore().getTable("db1", "t1");
+        Assert.assertNotNull(table);
+        table = newState.getLocalMetastore().getTable("db2", "t1");
+        Assert.assertEquals(1, table.getForeignKeyConstraints().size());
     }
 }

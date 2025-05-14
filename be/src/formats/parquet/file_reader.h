@@ -20,7 +20,7 @@
 #include <string>
 #include <vector>
 
-#include "block_cache/block_cache.h"
+#include "cache/block_cache/block_cache.h"
 #include "column/vectorized_fwd.h"
 #include "common/status.h"
 #include "common/statusor.h"
@@ -30,6 +30,7 @@
 #include "gen_cpp/parquet_types.h"
 #include "io/shared_buffered_input_stream.h"
 #include "runtime/runtime_state.h"
+#include "storage/runtime_range_pruner.hpp"
 
 namespace tparquet {
 class ColumnMetaData;
@@ -50,6 +51,7 @@ namespace parquet {
 struct ParquetField;
 } // namespace parquet
 struct TypeDescriptor;
+class ObjectCache;
 
 } // namespace starrocks
 
@@ -57,10 +59,12 @@ namespace starrocks::parquet {
 
 struct SplitContext : public HdfsSplitContext {
     FileMetaDataPtr file_metadata;
+    SkipRowsContextPtr skip_rows_ctx;
 
     HdfsSplitContextPtr clone() override {
         auto ctx = std::make_unique<SplitContext>();
         ctx->file_metadata = file_metadata;
+        ctx->skip_rows_ctx = skip_rows_ctx;
         return ctx;
     }
 };
@@ -69,8 +73,7 @@ class FileReader {
 public:
     FileReader(int chunk_size, RandomAccessFile* file, size_t file_size,
                const DataCacheOptions& datacache_options = DataCacheOptions(),
-               io::SharedBufferedInputStream* sb_stream = nullptr,
-               const std::set<int64_t>* _need_skip_rowids = nullptr);
+               io::SharedBufferedInputStream* sb_stream = nullptr, SkipRowsContextPtr skipRowsContext = nullptr);
     ~FileReader();
 
     Status init(HdfsScannerContext* scanner_ctx);
@@ -83,6 +86,8 @@ public:
 
     size_t row_group_size() const { return _row_group_size; }
 
+    const std::vector<std::shared_ptr<GroupReader>>& group_readers() const { return _row_group_readers; }
+
 private:
     int _chunk_size;
 
@@ -94,24 +99,12 @@ private:
 
     // filter row group by conjuncts
     bool _filter_group(const GroupReaderPtr& group_reader);
-
-    bool _filter_group_with_min_max_conjuncts(const GroupReaderPtr& group_reader);
-
-    bool _filter_group_with_bloom_filter_min_max_conjuncts(const GroupReaderPtr& group_reader);
-
-    bool _filter_group_with_more_filter(const GroupReaderPtr& group_reader);
+    StatusOr<bool> _update_rf_and_filter_group(const GroupReaderPtr& group_reader);
 
     // get row group to read
     // if scan range conatain the first byte in the row group, will be read
     // TODO: later modify the larger block should be read
     bool _select_row_group(const tparquet::RowGroup& row_group);
-
-    // make min/max chunk from stats of row group meta
-    // exist=true: group meta contain statistics info
-    Status _read_min_max_chunk(const GroupReaderPtr& group_reader, const std::vector<SlotDescriptor*>& slots,
-                               ChunkPtr* min_chunk, ChunkPtr* max_chunk) const;
-    Status _read_has_nulls(const GroupReaderPtr& group_reader, const std::vector<SlotDescriptor*>& slots,
-                           std::vector<bool>* has_nulls);
 
     // only scan partition column + not exist column
     Status _exec_no_materialized_column_scan(ChunkPtr* chunk);
@@ -120,6 +113,8 @@ private:
     int32_t _get_partition_column_idx(const std::string& col_name) const;
 
     Status _build_split_tasks();
+
+    Status _collect_row_group_io(std::shared_ptr<GroupReader>& group_reader);
 
     RandomAccessFile* _file = nullptr;
     uint64_t _file_size = 0;
@@ -133,7 +128,7 @@ private:
     size_t _scan_row_count = 0;
     bool _no_materialized_column_scan = false;
 
-    BlockCache* _cache = nullptr;
+    ObjectCache* _cache = nullptr;
     FileMetaDataPtr _file_metadata = nullptr;
 
     // not exist column conjuncts eval false, file can be skipped
@@ -142,7 +137,8 @@ private:
     io::SharedBufferedInputStream* _sb_stream = nullptr;
     GroupReaderParam _group_reader_param;
     std::shared_ptr<MetaHelper> _meta_helper = nullptr;
-    const std::set<int64_t>* _need_skip_rowids;
+    SkipRowsContextPtr _skip_rows_ctx = nullptr;
+    std::shared_ptr<RuntimeScanRangePruner> _rf_scan_range_pruner;
 };
 
 } // namespace starrocks::parquet

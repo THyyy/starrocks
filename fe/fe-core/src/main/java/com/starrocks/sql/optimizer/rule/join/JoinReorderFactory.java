@@ -39,17 +39,21 @@ public interface JoinReorderFactory {
         return (context, multiJoinNode) -> List.of(new JoinReorderCardinalityPreserving(context));
     }
 
+    static JoinReorderFactory createJoinReorderDrivingTable() {
+        return (context, multiJoinNode) -> List.of(new JoinReorderDrivingTable(context));
+    }
+
     static JoinReorderFactory createJoinReorderAdaptive() {
         return (context, multiJoinNode) -> {
             List<JoinOrder> algorithms = Lists.newArrayList();
             algorithms.add(new JoinReorderLeftDeep(context));
 
             SessionVariable sv = context.getSessionVariable();
-            if (multiJoinNode.getAtoms().size() <= sv.getCboMaxReorderNodeUseDP() && sv.isCboEnableDPJoinReorder()) {
+            if (sv.isCboEnableDPJoinReorder() && multiJoinNode.getAtoms().size() <= sv.getCboMaxReorderNodeUseDP()) {
                 algorithms.add(new JoinReorderDP(context));
             }
 
-            if (sv.isCboEnableGreedyJoinReorder()) {
+            if (sv.isCboEnableGreedyJoinReorder() && multiJoinNode.getAtoms().size() <= sv.getCboMaxReorderNodeUseGreedy()) {
                 algorithms.add(new JoinReorderGreedy(context));
             }
 

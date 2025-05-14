@@ -20,7 +20,7 @@ import com.starrocks.catalog.PartitionInfo;
 import com.starrocks.common.Config;
 import com.starrocks.common.util.FrontendDaemon;
 import com.starrocks.load.loadv2.LoadsHistorySyncer;
-import com.starrocks.load.pipe.filelist.RepoExecutor;
+import com.starrocks.qe.SimpleExecutor;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.statistic.columns.PredicateColumnsStorage;
 import jdk.jshell.spi.ExecutionControl;
@@ -45,8 +45,6 @@ public class TableKeeper {
     private final String tableName;
     private final String createTableSql;
 
-    private boolean databaseExisted = false;
-    private boolean tableExisted = false;
     private final boolean tableCorrected = false;
     private final Supplier<Integer> ttlSupplier;
 
@@ -62,20 +60,16 @@ public class TableKeeper {
 
     public synchronized void run() {
         try {
-            if (!databaseExisted) {
-                databaseExisted = checkDatabaseExists();
-                if (!databaseExisted) {
-                    LOG.warn("database not exists: {}", databaseName);
-                    return;
-                }
+            if (!checkDatabaseExists()) {
+                LOG.warn("database not exists: {}", databaseName);
+                return;
             }
-            if (!tableExisted) {
+            if (!checkTableExists()) {
                 createTable();
                 LOG.info("table created: {}", tableName);
-                tableExisted = checkTableExists();
             }
-            correctTable();
-            if (tableExisted) {
+            if (checkTableExists()) {
+                correctTable();
                 changeTTL();
             }
         } catch (Exception e) {
@@ -87,7 +81,7 @@ public class TableKeeper {
      * Is the table ready for insert
      */
     public synchronized boolean isReady() {
-        return databaseExisted && tableExisted;
+        return checkDatabaseExists() && checkTableExists();
     }
 
     public boolean checkDatabaseExists() {
@@ -99,7 +93,7 @@ public class TableKeeper {
     }
 
     public void createTable() throws ExecutionControl.UserException {
-        RepoExecutor.getInstance().executeDDL(createTableSql);
+        SimpleExecutor.getRepoExecutor().executeDDL(createTableSql);
     }
 
     public void correctTable() {
@@ -113,7 +107,7 @@ public class TableKeeper {
         if (replica != expectedReplicationNum) {
             String sql = alterTableReplicas(expectedReplicationNum);
             if (StringUtils.isNotEmpty(sql)) {
-                RepoExecutor.getInstance().executeDDL(sql);
+                SimpleExecutor.getRepoExecutor().executeDDL(sql);
             }
             LOG.info("changed replication_number of table {} from {} to {}",
                     tableName, replica, expectedReplicationNum);
@@ -136,7 +130,7 @@ public class TableKeeper {
         }
         String sql = alterTableTTL(expectedTTLDays);
         try {
-            RepoExecutor.getInstance().executeDDL(sql);
+            SimpleExecutor.getRepoExecutor().executeDDL(sql);
             LOG.info("change table {}.{} TTL from {} to {}",
                     databaseName, tableName, currentTTLNumber, expectedTTLDays);
         } catch (Throwable e) {
@@ -184,20 +178,8 @@ public class TableKeeper {
         return createTableSql;
     }
 
-    public boolean isDatabaseExisted() {
-        return databaseExisted;
-    }
-
-    public boolean isTableExisted() {
-        return tableExisted;
-    }
-
     public boolean isTableCorrected() {
         return tableCorrected;
-    }
-
-    public void setDatabaseExisted(boolean databaseExisted) {
-        this.databaseExisted = databaseExisted;
     }
 
     public static TableKeeperDaemon startDaemon() {

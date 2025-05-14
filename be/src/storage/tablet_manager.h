@@ -155,7 +155,9 @@ public:
                                 const std::string& schema_hash_path, bool force = false, bool restore = false);
 
     Status create_tablet_from_meta_snapshot(DataDir* data_dir, TTabletId tablet_id, SchemaHash schema_hash,
-                                            const std::string& schema_hash_path, bool restore = false);
+                                            const std::string& schema_hash_path, bool restore = false,
+                                            bool need_rebuild_pk_index = false,
+                                            int32_t rebuild_pk_index_wait_seconds = 0);
 
     void release_schema_change_lock(TTabletId tablet_id);
 
@@ -276,6 +278,8 @@ private:
     // caller should acquire _shutdown_tablets_lock
     void _add_shutdown_tablet_unlocked(int64_t tablet_id, DroppedTabletInfo&& drop_info);
     void sweep_shutdown_tablet(const DroppedTabletInfo& info, std::vector<DroppedTabletInfo>& finished_tablets);
+
+    std::vector<TabletSharedPtr> _get_all_tablets_from_shard(const TabletsShard& shard);
 
     static Status _remove_tablet_meta(const TabletSharedPtr& tablet);
     static Status _remove_tablet_directories(const TabletSharedPtr& tablet);

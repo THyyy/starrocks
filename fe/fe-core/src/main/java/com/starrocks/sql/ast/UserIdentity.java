@@ -41,16 +41,13 @@ import com.starrocks.authentication.AuthenticationMgr;
 import com.starrocks.cluster.ClusterNamespace;
 import com.starrocks.common.CaseSensibility;
 import com.starrocks.common.PatternMatcher;
-import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import com.starrocks.persist.gson.GsonPostProcessable;
-import com.starrocks.persist.gson.GsonUtils;
 import com.starrocks.sql.analyzer.FeNameFormat;
 import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.thrift.TUserIdentity;
 
-import java.io.DataOutput;
 import java.io.IOException;
 
 // https://dev.mysql.com/doc/refman/8.0/en/account-names.html
@@ -89,14 +86,14 @@ public class UserIdentity implements ParseNode, Writable, GsonPostProcessable {
     }
 
     public UserIdentity(boolean ephemeral, String user, String host) {
-        this(user, host, false, NodePosition.ZERO, ephemeral);
+        this(user, host, false, ephemeral, NodePosition.ZERO);
     }
 
     public UserIdentity(String user, String host, boolean isDomain) {
-        this(user, host, isDomain, NodePosition.ZERO, false);
+        this(user, host, isDomain, false, NodePosition.ZERO);
     }
 
-    public UserIdentity(String user, String host, boolean isDomain, NodePosition pos, boolean ephemeral) {
+    public UserIdentity(String user, String host, boolean isDomain, boolean ephemeral, NodePosition pos) {
         this.pos = pos;
         this.user = user;
         this.host = Strings.emptyToNull(host);
@@ -113,7 +110,8 @@ public class UserIdentity implements ParseNode, Writable, GsonPostProcessable {
     }
 
     public static UserIdentity fromThrift(TUserIdentity tUserIdent) {
-        return new UserIdentity(tUserIdent.getUsername(), tUserIdent.getHost(), tUserIdent.is_domain);
+        return new UserIdentity(tUserIdent.getUsername(), tUserIdent.getHost(), tUserIdent.is_domain,
+                tUserIdent.is_ephemeral, NodePosition.ZERO);
     }
 
     public static UserIdentity createEphemeralUserIdent(String user, String host) {
@@ -218,11 +216,6 @@ public class UserIdentity implements ParseNode, Writable, GsonPostProcessable {
             sb.append("%");
         }
         return sb.toString();
-    }
-
-    @Override
-    public void write(DataOutput out) throws IOException {
-        Text.writeString(out, GsonUtils.GSON.toJson(this));
     }
 
     @Override

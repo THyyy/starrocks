@@ -107,10 +107,8 @@ set(STORAGE_FILES
     rowset/segment_rewriter.cpp
     rowset/segment_group.cpp
     rowset/storage_page_decoder.cpp
-    rowset/block_split_bloom_filter.cpp
     rowset/bloom_filter_index_reader.cpp
     rowset/bloom_filter_index_writer.cpp
-    rowset/bloom_filter.cpp
     rowset/parsed_page.cpp
     rowset/zone_map_index.cpp
     rowset/segment_iterator.cpp
@@ -139,6 +137,7 @@ set(STORAGE_FILES
     column_and_predicate.cpp
     column_expr_predicate.cpp
     conjunctive_predicates.cpp
+    runtime_filter_predicate.cpp
     predicate_tree/predicate_tree.cpp
     convert_helper.cpp
     delete_predicates.cpp
@@ -241,6 +240,7 @@ set(STORAGE_FILES
     lake/txn_log_applier.cpp
     lake/lake_local_persistent_index.cpp
     persistent_index_compaction_manager.cpp
+    persistent_index_load_executor.cpp
     lake/local_pk_index_manager.cpp
     persistent_index_tablet_loader.cpp
     lake/lake_local_persistent_index_tablet_loader.cpp

@@ -105,7 +105,7 @@ CREATE TABLE test_tbl (id INT, city STRING);
 
 2. 配置并启动 Kafka Connect。
 
-   1. 配置 Kafka Connect。在 **config** 目录中的 `config/connect-standalone.properties` 配置文件中配置如下参数。参数解释，参见 [Running Kafka Connect](https://kafka.apache.org/documentation.html#connect_running)。
+   1. 配置 Kafka Connect。在 **config** 目录中的 `config/connect-standalone.properties` 配置文件中配置如下参数。参数解释，参见 [Running Kafka Connect](https://kafka.apache.org/documentation.html#connect_running)。 注意以下示例中使用 starrocks-kafka-connector 是 `1.0.3` 版本，如果使用更新的版本需要做相应变更。
 
         ```yaml
         # kafka broker 的地址，多个 Broker 之间以英文逗号 (,) 分隔。
@@ -532,7 +532,7 @@ DISTRIBUTED BY hash(id) buckets 1
 PROPERTIES (
 "bucket_size" = "4294967296",
 "in_memory" = "false",
-"enable_persistent_index" = "false",
+"enable_persistent_index" = "true",
 "replicated_storage" = "true",
 "fast_schema_evolution" = "true"
 );

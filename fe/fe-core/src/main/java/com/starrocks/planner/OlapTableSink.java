@@ -34,6 +34,7 @@
 
 package com.starrocks.planner;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Lists;
@@ -144,6 +145,7 @@ public class OlapTableSink extends DataSink {
     private long warehouseId = WarehouseManager.DEFAULT_WAREHOUSE_ID;
     private long automaticBucketSize = 0;
     private boolean enableDynamicOverwrite = false;
+    private boolean isFromOverwrite = false;
 
     public OlapTableSink(OlapTable dstTable, TupleDescriptor tupleDescriptor, List<Long> partitionIds,
                          TWriteQuorumType writeQuorum, boolean enableReplicatedStorage,
@@ -161,7 +163,7 @@ public class OlapTableSink extends DataSink {
             for (int i = 0; i < this.tupleDescriptor.getSlots().size(); ++i) {
                 SlotDescriptor slot = this.tupleDescriptor.getSlots().get(i);
                 if (slot.getColumn().isAutoIncrement()) {
-                    this.autoIncrementSlotId = i;
+                    this.autoIncrementSlotId = slot.getId().asInt();
                     break;
                 }
             }
@@ -234,6 +236,10 @@ public class OlapTableSink extends DataSink {
         this.enableDynamicOverwrite = enableDynamicOverwrite;
     }
 
+    public void setIsFromOverwrite(boolean isFromOverwrite) {
+        this.isFromOverwrite = isFromOverwrite;
+    }
+
     public void complete(String mergeCondition) throws StarRocksException {
         TOlapTableSink tSink = tDataSink.getOlap_table_sink();
         if (mergeCondition != null && !mergeCondition.isEmpty()) {
@@ -243,11 +249,16 @@ public class OlapTableSink extends DataSink {
     }
 
     public List<Long> getOpenPartitions() {
+        // if load start after shema change, we should open all of the partitions to avoid different schema during schema change
+        // if load start before schema change, it will be finished in waiting_txn state
+        if (dstTable.getState() != OlapTable.OlapTableState.NORMAL) {
+            return partitionIds;
+        }
         if (enableAutomaticPartition && enableDynamicOverwrite) {
             return new ArrayList<>(Collections.singletonList(
                     dstTable.getPartition(ExpressionRangePartitionInfo.AUTOMATIC_SHADOW_PARTITION_NAME).getId()));
         }
-        if (!enableAutomaticPartition || Config.max_load_initial_open_partition_number <= 0
+        if (isFromOverwrite || !enableAutomaticPartition || Config.max_load_initial_open_partition_number <= 0
                 || partitionIds.size() < Config.max_load_initial_open_partition_number) {
             return partitionIds;
         }
@@ -841,6 +852,17 @@ public class OlapTableSink extends DataSink {
         return locationParam;
     }
 
+    @VisibleForTesting
+    public static int findPrimaryReplica(OlapTable table,
+                                         Map<Long, Long> bePrimaryMap,
+                                         SystemInfoService infoService,
+                                         MaterializedIndex index,
+                                         List<Long> selectedBackedIds,
+                                         List<Replica> replicas) {
+        return findPrimaryReplica(table, bePrimaryMap, infoService,
+                index, selectedBackedIds, 0, replicas);
+    }
+
     private static int findPrimaryReplica(OlapTable table,
                                           Map<Long, Long> bePrimaryMap,
                                           SystemInfoService infoService,
@@ -861,15 +883,23 @@ public class OlapTableSink extends DataSink {
         int lowUsageIndex = -1;
         for (int i = 0; i < replicas.size(); i++) {
             Replica replica = replicas.get(i);
-            if (lowUsageIndex == -1 && !replica.getLastWriteFail()
-                    && !infoService.getBackend(replica.getBackendId()).getLastWriteFail()) {
+            boolean isHealthy = !replica.getLastWriteFail()
+                    && !infoService.getBackend(replica.getBackendId()).getLastWriteFail();
+            
+            // The isAlive() flag indicates node availability during shutdown sequences.
+            // For single-replica configurations, we bypass node status checks to maintain
+            // loading operation continuity despite shutdown transitions.
+            if (replicas.size() > 1) {
+                isHealthy = isHealthy && infoService.getBackend(replica.getBackendId()).isAlive();
+            }
+            
+            if (lowUsageIndex == -1 && isHealthy) {
                 lowUsageIndex = i;
             }
             if (lowUsageIndex != -1
                     && bePrimaryMap.getOrDefault(replica.getBackendId(), (long) 0) < bePrimaryMap
                     .getOrDefault(replicas.get(lowUsageIndex).getBackendId(), (long) 0)
-                    && !replica.getLastWriteFail()
-                    && !infoService.getBackend(replica.getBackendId()).getLastWriteFail()) {
+                    && isHealthy) {
                 lowUsageIndex = i;
             }
         }

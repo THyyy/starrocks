@@ -845,7 +845,7 @@ public abstract class Type implements Cloneable {
 
     public boolean canStatistic() {
         // TODO(mofei) support statistic by for JSON
-        return !isOnlyMetricType() && !isJsonType() && !isComplexType() && !isFunctionType()
+        return !isOnlyMetricType() && !isJsonType() && !isStructType() && !isFunctionType()
                 && !isBinaryType();
     }
 
@@ -1155,6 +1155,9 @@ public abstract class Type implements Cloneable {
             return false;
         } else if (from.isJsonType() && to.isStructType()) {
             return true;
+        } else if (from.isJsonType() && to.isMapType()) {
+            MapType map = (MapType) to;
+            return canCastTo(Type.VARCHAR, map.getKeyType()) && canCastTo(Type.JSON, map.getValueType());
         } else if (from.isBoolean() && to.isComplexType()) {
             // for mock nest type with NULL value, the cast must return NULL
             // like cast(map{1: NULL} as MAP<int, int>)

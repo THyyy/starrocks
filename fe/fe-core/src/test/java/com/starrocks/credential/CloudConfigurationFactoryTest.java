@@ -50,6 +50,8 @@ public class CloudConfigurationFactoryTest {
 
         map.remove(AwsClientProperties.CLIENT_REGION);
         map.remove(S3FileIOProperties.PATH_STYLE_ACCESS);
+        map.put(S3FileIOProperties.ENDPOINT, "endpoint");
+        map.put(CloudConfigurationConstants.AWS_S3_REGION, "us-west-2");
         cloudConfiguration = CloudConfigurationFactory.buildCloudConfigurationForVendedCredentials(map);
         Assert.assertNotNull(cloudConfiguration);
         Assert.assertEquals(CloudType.AWS, cloudConfiguration.getCloudType());
@@ -58,7 +60,7 @@ public class CloudConfigurationFactoryTest {
                         "cred=AWSCloudCredential{useAWSSDKDefaultBehavior=false, " +
                         "useInstanceProfile=false, accessKey='ak', secretKey='sk', " +
                         "sessionToken='token', iamRoleArn='', stsRegion='', stsEndpoint='', externalId='', " +
-                        "region='us-east-1', endpoint=''}, enablePathStyleAccess=false, enableSSL=true}",
+                        "region='us-west-2', endpoint='endpoint'}, enablePathStyleAccess=false, enableSSL=true}",
                 cloudConfiguration.toConfString());
     }
 

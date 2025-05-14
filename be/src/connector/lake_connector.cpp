@@ -23,11 +23,11 @@
 #include "runtime/global_dict/parser.h"
 #include "storage/column_predicate_rewriter.h"
 #include "storage/lake/tablet.h"
-#include "storage/olap_runtime_range_pruner.hpp"
 #include "storage/predicate_parser.h"
 #include "storage/predicate_tree/predicate_tree.hpp"
 #include "storage/projection_iterator.h"
 #include "storage/rowset/short_key_range_option.h"
+#include "storage/runtime_range_pruner.hpp"
 #include "util/starrocks_metrics.h"
 
 namespace starrocks::connector {
@@ -103,7 +103,7 @@ Status LakeDataSource::open(RuntimeState* state) {
     opts.max_scan_key_num = max_scan_key_num;
     opts.enable_column_expr_predicate = enable_column_expr_predicate;
     opts.pred_tree_params = state->fragment_ctx()->pred_tree_params();
-    opts.driver_sequence = runtime_bloom_filter_eval_context.driver_sequence;
+    opts.driver_sequence = runtime_membership_filter_eval_context.driver_sequence;
 
     _conjuncts_manager = std::make_unique<ScanConjunctsManager>(std::move(opts));
     ScanConjunctsManager& cm = *_conjuncts_manager;
@@ -256,9 +256,14 @@ Status LakeDataSource::init_reader_params(const std::vector<OlapScanRange*>& key
     _params.skip_aggregation = skip_aggregation;
     _params.profile = _runtime_profile;
     _params.runtime_state = _runtime_state;
-    _params.use_page_cache = !config::disable_storage_page_cache && _scan_range.fill_data_cache;
+    _params.use_page_cache =
+            !config::disable_storage_page_cache && _scan_range.fill_data_cache && !_scan_range.skip_page_cache;
     _params.lake_io_opts.fill_data_cache = _scan_range.fill_data_cache;
-    _params.runtime_range_pruner = OlapRuntimeScanRangePruner(parser, _conjuncts_manager->unarrived_runtime_filters());
+    _params.lake_io_opts.skip_disk_cache = _scan_range.skip_disk_cache;
+    _params.runtime_range_pruner = RuntimeScanRangePruner(parser, _conjuncts_manager->unarrived_runtime_filters());
+    _params.lake_io_opts.cache_file_only = _runtime_state->query_options().__isset.enable_cache_select &&
+                                           _runtime_state->query_options().enable_cache_select &&
+                                           config::lake_cache_select_in_physical_way;
     _params.splitted_scan_rows = _provider->get_splitted_scan_rows();
     _params.scan_dop = _provider->get_scan_dop();
 

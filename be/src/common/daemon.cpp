@@ -36,7 +36,6 @@
 
 #include <gflags/gflags.h>
 
-#include "block_cache/block_cache.h"
 #include "column/column_helper.h"
 #include "common/config.h"
 #include "common/minidump.h"
@@ -48,16 +47,15 @@
 #include "fs/encrypt_file.h"
 #include "gutil/cpu.h"
 #include "jemalloc/jemalloc.h"
-#include "runtime/memory/mem_chunk_allocator.h"
 #include "runtime/time_types.h"
 #include "runtime/user_function_cache.h"
 #include "service/backend_options.h"
+#include "service/mem_hook.h"
 #include "storage/options.h"
 #include "storage/storage_engine.h"
 #include "util/cpu_info.h"
 #include "util/debug_util.h"
 #include "util/disk_info.h"
-#include "util/gc_helper.h"
 #include "util/logging.h"
 #include "util/mem_info.h"
 #include "util/misc.h"
@@ -136,23 +134,6 @@ void calculate_metrics(void* arg_this) {
                                                                                 &lst_net_receive_bytes);
         }
 
-        // update datacache mem_tracker
-        int64_t datacache_mem_bytes = 0;
-        auto datacache_mem_tracker = GlobalEnv::GetInstance()->datacache_mem_tracker();
-        if (datacache_mem_tracker) {
-            BlockCache* block_cache = BlockCache::instance();
-            if (block_cache->is_initialized()) {
-                auto datacache_metrics = block_cache->cache_metrics();
-                datacache_mem_bytes = datacache_metrics.mem_used_bytes + datacache_metrics.meta_used_bytes;
-            }
-#ifdef USE_STAROS
-            if (!config::datacache_unified_instance_enable) {
-                datacache_mem_bytes += staros::starlet::fslib::star_cache_get_memory_usage();
-            }
-#endif
-            datacache_mem_tracker->set(datacache_mem_bytes);
-        }
-
         auto* mem_metrics = StarRocksMetrics::instance()->system_metrics()->memory_metrics();
 
         LOG(INFO) << fmt::format(
@@ -165,9 +146,10 @@ void calculate_metrics(void* arg_this) {
                 mem_metrics->compaction_mem_bytes.value(), mem_metrics->schema_change_mem_bytes.value(),
                 mem_metrics->storage_page_cache_mem_bytes.value(), mem_metrics->update_mem_bytes.value(),
                 mem_metrics->chunk_allocator_mem_bytes.value(), mem_metrics->passthrough_mem_bytes.value(),
-                mem_metrics->clone_mem_bytes.value(), mem_metrics->consistency_mem_bytes.value(), datacache_mem_bytes,
-                mem_metrics->jit_cache_mem_bytes.value());
+                mem_metrics->clone_mem_bytes.value(), mem_metrics->consistency_mem_bytes.value(),
+                mem_metrics->datacache_mem_bytes.value(), mem_metrics->jit_cache_mem_bytes.value());
 
+        StarRocksMetrics::instance()->table_metrics_mgr()->cleanup();
         nap_sleep(15, [daemon] { return daemon->stopped(); });
     }
 }
@@ -211,7 +193,6 @@ static void retrieve_jemalloc_stats(JemallocStats* stats) {
 // Tracker the memory usage of jemalloc
 void jemalloc_tracker_daemon(void* arg_this) {
     auto* daemon = static_cast<Daemon*>(arg_this);
-    double smoothed_fragmentation = 0;
     while (!daemon->stopped()) {
         JemallocStats stats;
         retrieve_jemalloc_stats(&stats);
@@ -221,35 +202,6 @@ void jemalloc_tracker_daemon(void* arg_this) {
             auto tracker = GlobalEnv::GetInstance()->jemalloc_metadata_traker();
             int64_t delta = stats.metadata - tracker->consumption();
             tracker->consume(delta);
-        }
-
-        // Fragmentation and dirty memory:
-        // Jemalloc retains some dirty memory and gradually returns it to the OS, which cannot be reused by the application.
-        // Failing to account for this memory in the MemoryTracker may lead to memory allocation failures or even process
-        // termination by the OS; however, retaining excessive memory in the tracker is also wasteful.
-        // To address this, we employ a smoothing formula to track fragmentation and dirty memory, which also mitigates
-        // the impact of sudden memory releases, such as those occurring when a large query is executed:
-        // S_t = \exp\left(\alpha \cdot \log(1 + x_t) + (1 - \alpha) \cdot \log(1 + S_{t-1})\right) - 1
-        if (GlobalEnv::GetInstance()->jemalloc_fragmentation_traker()) {
-            if (stats.resident > 0 && stats.allocated > 0 && stats.metadata > 0) {
-                double fragmentation = stats.resident - stats.allocated - stats.metadata;
-                if (fragmentation < 0) fragmentation = 0;
-
-                // log transformation
-                double alpha = std::clamp(config::jemalloc_fragmentation_ratio, 0.1, 0.9);
-                fragmentation = std::log1p(fragmentation);
-                // smoothing
-                fragmentation = alpha * fragmentation + smoothed_fragmentation * (1 - alpha);
-                // restore the log value
-                smoothed_fragmentation = fragmentation;
-                fragmentation = std::expm1(fragmentation);
-
-                if (fragmentation >= 0) {
-                    auto tracker = GlobalEnv::GetInstance()->jemalloc_fragmentation_traker();
-                    int64_t delta = fragmentation - tracker->consumption();
-                    tracker->consume(delta);
-                }
-            }
         }
 
         nap_sleep(1, [daemon] { return daemon->stopped(); });
@@ -374,6 +326,14 @@ void Daemon::init(bool as_cn, const std::vector<StorePath>& paths) {
 
     init_signals();
     init_minidump();
+#if defined(__SANITIZE_ADDRESS__) || defined(ADDRESS_SANITIZER)
+#else
+    // Don't bother set the limit if the process is running with very limited memory capacity
+    if (MemInfo::physical_mem() > 1024 * 1024 * 1024) {
+        // set mem hook to reject the memory allocation if large than available physical memory detected.
+        set_large_memory_alloc_failure_threshold(MemInfo::physical_mem());
+    }
+#endif
 }
 
 void Daemon::stop() {

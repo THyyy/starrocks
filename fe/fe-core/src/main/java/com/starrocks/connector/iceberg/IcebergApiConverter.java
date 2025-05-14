@@ -14,6 +14,7 @@
 
 package com.starrocks.connector.iceberg;
 
+import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.starrocks.catalog.ArrayType;
 import com.starrocks.catalog.Column;
@@ -25,8 +26,11 @@ import com.starrocks.catalog.ScalarType;
 import com.starrocks.catalog.StructField;
 import com.starrocks.catalog.StructType;
 import com.starrocks.catalog.Type;
+import com.starrocks.connector.ConnectorViewDefinition;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.connector.hive.RemoteFileInputFormat;
+import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.thrift.TIcebergColumnStats;
 import com.starrocks.thrift.TIcebergDataFile;
 import com.starrocks.thrift.TIcebergSchema;
@@ -61,8 +65,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -76,6 +82,7 @@ import static com.starrocks.connector.iceberg.IcebergMetadata.COMPRESSION_CODEC;
 import static com.starrocks.connector.iceberg.IcebergMetadata.FILE_FORMAT;
 import static com.starrocks.server.CatalogMgr.ResourceMappingCatalog.toResourceName;
 import static java.lang.String.format;
+import static org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap.copyOf;
 import static org.apache.iceberg.view.ViewProperties.COMMENT;
 
 public class IcebergApiConverter {
@@ -97,7 +104,9 @@ public class IcebergApiConverter {
                 .setComment(nativeTbl.properties().getOrDefault("common", ""))
                 .setNativeTable(nativeTbl)
                 .setFullSchema(toFullSchemas(nativeTbl.schema()))
-                .setIcebergProperties(toIcebergProps(nativeCatalogType));
+                .setIcebergProperties(toIcebergProps(
+                        nativeTbl.properties() != null ? Optional.of(copyOf(nativeTbl.properties())) : Optional.empty(),
+                        nativeCatalogType));
 
         return tableBuilder.build();
     }
@@ -218,10 +227,15 @@ public class IcebergApiConverter {
         return fullSchema;
     }
 
-    public static Map<String, String> toIcebergProps(String nativeCatalogType) {
-        Map<String, String> options = new HashMap<>();
-        options.put(ICEBERG_CATALOG_TYPE, nativeCatalogType);
-        return options;
+    public static Map<String, String> toIcebergProps(Optional<Map<String, String>> properties, String nativeCatalogType) {
+        AtomicReference<Map<String, String>> options = new AtomicReference<>();
+        properties.ifPresentOrElse(value -> {
+            options.set(new HashMap<>(value));
+        },
+                () -> options.set(new HashMap<>()));
+
+        options.get().put(ICEBERG_CATALOG_TYPE, nativeCatalogType);
+        return options.get();
     }
 
     public static RemoteFileInputFormat getHdfsFileFormat(FileFormat format) {
@@ -424,5 +438,25 @@ public class IcebergApiConverter {
 
     public static Namespace convertDbNameToNamespace(String dbName) {
         return Namespace.of(dbName.split("\\."));
+    }
+
+    public static Map<String, String> buildViewProperties(ConnectorViewDefinition definition, String catalogName) {
+        ConnectContext connectContext = ConnectContext.get();
+        if (connectContext == null) {
+            throw new StarRocksConnectorException("not found connect context when building iceberg view properties");
+        }
+
+        String queryId = connectContext.getQueryId().toString();
+
+        Map<String, String> properties = com.google.common.collect.ImmutableMap.of(
+                "queryId", queryId,
+                "starrocksCatalog", catalogName,
+                "starrocksVersion", GlobalStateMgr.getCurrentState().getNodeMgr().getMySelf().getFeVersion());
+
+        if (!Strings.isNullOrEmpty(definition.getComment())) {
+            properties.put(IcebergMetadata.COMMENT, definition.getComment());
+        }
+
+        return properties;
     }
 }

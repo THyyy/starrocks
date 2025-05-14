@@ -117,7 +117,7 @@ StatusOr<ByteBufferPtr> StreamLoadPipe::read() {
 StatusOr<ByteBufferPtr> StreamLoadPipe::no_block_read() {
     std::unique_lock<std::mutex> l(_lock);
 
-    _get_cond.wait_for(l, std::chrono::milliseconds(_non_blocking_wait_ms),
+    _get_cond.wait_for(l, std::chrono::microseconds(_non_blocking_wait_us),
                        [&]() { return _cancelled || _finished || !_buf_queue.empty(); });
 
     // cancelled
@@ -184,7 +184,7 @@ Status StreamLoadPipe::no_block_read(uint8_t* data, size_t* data_size, bool* eof
         if (_read_buf == nullptr || !_read_buf->has_remaining()) {
             std::unique_lock<std::mutex> l(_lock);
 
-            _get_cond.wait_for(l, std::chrono::milliseconds(_non_blocking_wait_ms),
+            _get_cond.wait_for(l, std::chrono::microseconds(_non_blocking_wait_us),
                                [&]() { return _cancelled || _finished || !_buf_queue.empty(); });
 
             // cancelled
@@ -273,11 +273,15 @@ StatusOr<ByteBufferPtr> CompressedStreamLoadPipeReader::read() {
         RETURN_IF_ERROR(StreamCompression::create_decompressor(compression, &_decompressor));
     }
 
-    if (_decompressed_buffer == nullptr) {
-        ASSIGN_OR_RETURN(_decompressed_buffer, ByteBuffer::allocate_with_tracker(buffer_size));
-    }
-
     ASSIGN_OR_RETURN(auto buf, StreamLoadPipeReader::read());
+    if (_decompressed_buffer == nullptr) {
+        ASSIGN_OR_RETURN(_decompressed_buffer, ByteBuffer::allocate_with_tracker(buffer_size, buf->meta()->type()));
+    }
+    // copy meta fail better not affect the decompression
+    Status copy_st = _decompressed_buffer->meta()->copy_from(buf->meta());
+    if (!copy_st.ok()) {
+        LOG_EVERY_N(WARNING, 1000) << "failed to copy meta when decompression, " << copy_st;
+    }
 
     // try to read all compressed data into _decompressed_buffer
     bool stream_end = false;

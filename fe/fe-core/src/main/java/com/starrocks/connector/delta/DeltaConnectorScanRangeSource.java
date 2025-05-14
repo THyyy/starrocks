@@ -46,7 +46,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static com.starrocks.common.profile.Tracers.Module.EXTERNAL;
 
-public class DeltaConnectorScanRangeSource implements ConnectorScanRangeSource {
+public class DeltaConnectorScanRangeSource extends ConnectorScanRangeSource {
     private static final Logger LOG = LogManager.getLogger(DeltaConnectorScanRangeSource.class);
     private DeltaLakeTable table;
     private RemoteFileInfoSource remoteFileInfoSource;
@@ -95,8 +95,12 @@ public class DeltaConnectorScanRangeSource implements ConnectorScanRangeSource {
         DescriptorTable.ReferencedPartitionInfo referencedPartitionInfo = referencedPartitions.get(partitionId);
         TScanRangeLocations scanRangeLocations = new TScanRangeLocations();
         THdfsScanRange hdfsScanRange = new THdfsScanRange();
-        hdfsScanRange.setRelative_path(URLDecoder.decode("/" + Paths.get(table.getTableLocation()).
-                relativize(Paths.get(fileStatus.getPath())), StandardCharsets.UTF_8));
+        if (fileStatus.getPath().contains(table.getTableLocation())) {
+            hdfsScanRange.setRelative_path(URLDecoder.decode("/" + Paths.get(table.getTableLocation()).
+                    relativize(Paths.get(fileStatus.getPath())), StandardCharsets.UTF_8));
+        } else {
+            hdfsScanRange.setFull_path(URLDecoder.decode(fileStatus.getPath(), StandardCharsets.UTF_8));
+        }
         hdfsScanRange.setOffset(0);
         hdfsScanRange.setLength(fileStatus.getSize());
         hdfsScanRange.setPartition_id(partitionId);
@@ -124,7 +128,7 @@ public class DeltaConnectorScanRangeSource implements ConnectorScanRangeSource {
     }
 
     @Override
-    public List<TScanRangeLocations> getOutputs(int maxSize) {
+    public List<TScanRangeLocations> getSourceOutputs(int maxSize) {
         try (Timer ignored = Tracers.watchScope(EXTERNAL, "DeltaLake.getScanFiles")) {
             List<TScanRangeLocations> res = new ArrayList<>();
             while (hasMoreOutput() && res.size() < maxSize) {
@@ -136,7 +140,7 @@ public class DeltaConnectorScanRangeSource implements ConnectorScanRangeSource {
     }
 
     @Override
-    public boolean hasMoreOutput() {
+    public boolean sourceHasMoreOutput() {
         try (Timer ignored = Tracers.watchScope(EXTERNAL, "DeltaLake.getScanFiles")) {
             return remoteFileInfoSource.hasMoreOutput();
         }

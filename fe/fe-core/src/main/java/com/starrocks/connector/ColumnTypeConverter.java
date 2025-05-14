@@ -52,6 +52,7 @@ import org.apache.paimon.types.IntType;
 import org.apache.paimon.types.LocalZonedTimestampType;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.types.SmallIntType;
+import org.apache.paimon.types.TimeType;
 import org.apache.paimon.types.TimestampType;
 import org.apache.paimon.types.TinyIntType;
 import org.apache.paimon.types.VarBinaryType;
@@ -102,7 +103,7 @@ public class ColumnTypeConverter {
     public static final String STRUCT_PATTERN = "^struct<" + COMPLEX_PATTERN + ">";
     public static final String CHAR_PATTERN = "^char\\(([0-9]+)\\)";
     public static final String VARCHAR_PATTERN = "^varchar\\(([0-9,-1]+)\\)";
-    protected static final List<String> HIVE_UNSUPPORTED_TYPES = Arrays.asList("BINARY", "UNIONTYPE");
+    protected static final List<String> HIVE_UNSUPPORTED_TYPES = Arrays.asList("UNIONTYPE");
 
     public static Type fromHiveType(String hiveType) {
         String typeUpperCase = getTypeKeyword(hiveType).toUpperCase();
@@ -547,6 +548,10 @@ public class ColumnTypeConverter {
             return ScalarType.createType(PrimitiveType.DATE);
         }
 
+        public Type visit(TimeType timeType) {
+            return ScalarType.createType(PrimitiveType.TIME);
+        }
+
         public Type visit(TimestampType timestampType) {
             return ScalarType.createType(PrimitiveType.DATETIME);
         }
@@ -663,7 +668,6 @@ public class ColumnTypeConverter {
                 primitiveType = PrimitiveType.DATETIME;
                 break;
             case STRING:
-            case UUID:
                 return ScalarType.createDefaultCatalogString();
             case DECIMAL:
                 int precision = ((Types.DecimalType) icebergType).precision();
@@ -697,6 +701,7 @@ public class ColumnTypeConverter {
                 }
                 return new StructType(structFields);
             case BINARY:
+            case UUID:
                 return Type.VARBINARY;
             case TIME:
                 return Type.TIME;
@@ -761,12 +766,12 @@ public class ColumnTypeConverter {
             }
             int fieldId = -1;
             String fieldPhysicalName = "";
-            if (columnMappingMode.equals(ColumnMapping.COLUMN_MAPPING_MODE_ID) &&
+            if (columnMappingMode.equalsIgnoreCase(ColumnMapping.COLUMN_MAPPING_MODE_ID) &&
                     field.getMetadata().contains(ColumnMapping.COLUMN_MAPPING_ID_KEY)) {
                 fieldId = ((Long) field.getMetadata().get(ColumnMapping.COLUMN_MAPPING_ID_KEY)).intValue();
             }
 
-            if (columnMappingMode.equals(ColumnMapping.COLUMN_MAPPING_MODE_NAME) &&
+            if (columnMappingMode.equalsIgnoreCase(ColumnMapping.COLUMN_MAPPING_MODE_NAME) &&
                     field.getMetadata().contains(ColumnMapping.COLUMN_MAPPING_PHYSICAL_NAME_KEY)) {
                 fieldPhysicalName = (String) field.getMetadata().get(ColumnMapping.COLUMN_MAPPING_PHYSICAL_NAME_KEY);
             }

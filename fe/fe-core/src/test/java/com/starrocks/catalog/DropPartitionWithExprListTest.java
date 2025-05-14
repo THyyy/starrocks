@@ -16,26 +16,17 @@ package com.starrocks.catalog;
 
 import com.google.common.collect.Lists;
 import com.starrocks.clone.DynamicPartitionScheduler;
-import com.starrocks.common.util.UUIDUtil;
-import com.starrocks.pseudocluster.PseudoCluster;
-import com.starrocks.qe.ConnectContext;
-import com.starrocks.qe.StmtExecutor;
-import com.starrocks.scheduler.MVRefreshTestBase;
 import com.starrocks.scheduler.PartitionBasedMvRefreshProcessor;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.StatementBase;
-import com.starrocks.sql.parser.SqlParser;
+import com.starrocks.sql.optimizer.rule.transformation.materialization.MVTestBase;
 import com.starrocks.sql.plan.ExecPlan;
 import com.starrocks.sql.plan.PlanTestBase;
 import com.starrocks.statistic.StatisticsMetaManager;
 import com.starrocks.utframe.StarRocksAssert;
 import com.starrocks.utframe.UtFrameUtils;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Assert;
-import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
@@ -43,11 +34,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 
-public class DropPartitionWithExprListTest extends MVRefreshTestBase {
-    private static final Logger LOG = LogManager.getLogger(DropPartitionWithExprListTest.class);
-    protected static ConnectContext connectContext;
-    protected static PseudoCluster cluster;
-    protected static StarRocksAssert starRocksAssert;
+public class DropPartitionWithExprListTest extends MVTestBase {
     private static String T1;
     private static String T2;
     private static String T3;
@@ -142,47 +129,6 @@ public class DropPartitionWithExprListTest extends MVRefreshTestBase {
 
     @AfterClass
     public static void afterClass() throws Exception {
-    }
-
-    @Before
-    public void before() {
-    }
-
-    @After
-    public void after() throws Exception {
-    }
-
-    public static void executeInsertSql(String sql) throws Exception {
-        connectContext.setQueryId(UUIDUtil.genUUID());
-        StatementBase statement = SqlParser.parseSingleStatement(sql, connectContext.getSessionVariable().getSqlMode());
-        new StmtExecutor(connectContext, statement).execute();
-    }
-
-    private String toPartitionVal(String val) {
-        return val == null ? "NULL" : String.format("'%s'", val);
-    }
-
-    private void addListPartition(String tbl, String pName, String pVal1, String pVal2) {
-        addListPartition(tbl, pName, pVal1, pVal2, false);
-    }
-
-    private void addListPartition(String tbl, String pName, String pVal1, String pVal2, boolean isInsertValues) {
-        String addPartitionSql = String.format("ALTER TABLE %s ADD PARTITION IF NOT EXISTS %s VALUES IN ((%s, %s))",
-                tbl, pName, toPartitionVal(pVal1), toPartitionVal(pVal2));
-        StatementBase stmt = SqlParser.parseSingleStatement(addPartitionSql, connectContext.getSessionVariable().getSqlMode());
-        try {
-            // add a new partition
-            new StmtExecutor(connectContext, stmt).execute();
-
-            // insert values
-            if (isInsertValues) {
-                String insertSql = String.format("insert into %s partition(%s) values(1, 1, '%s', '%s');",
-                        tbl, pName, pVal1, pVal2);
-                executeInsertSql(insertSql);
-            }
-        } catch (Exception e) {
-            Assert.fail("add partition failed:" + e);
-        }
     }
 
     private void withTablePartitions(String tableName) {
@@ -739,5 +685,33 @@ public class DropPartitionWithExprListTest extends MVRefreshTestBase {
                                 });
                     });
         }
+    }
+
+    @Test
+    public void testPartitionConditionTTL1() throws Exception {
+        starRocksAssert.withTable("create table list_par_int(\n" +
+                " k1 int,\n" +
+                " k2 string)\n" +
+                " partition by list(k1)\n" +
+                " (partition p1 values in('1','2'),\n" +
+                "  partition p2 values in('3','4'),\n" +
+                "  partition p3 values in('5','6'),\n" +
+                "  partition p4 values in('7','8'),\n" +
+                "  partition p5 values in('9','10'),\n" +
+                "  partition p6 values in('11','12'),\n" +
+                "  partition p7 values in('13','14'),\n" +
+                "  partition p8 values in('15','16'),\n" +
+                "  partition p9 values in('17','18'),\n" +
+                "  partition p10 values in('19','20'))\n" +
+                " distributed by hash(k1)\n");
+
+        OlapTable olapTable = (OlapTable) starRocksAssert.getTable("test", "list_par_int");
+        Assert.assertEquals(10, olapTable.getVisiblePartitions().size());
+
+        String sql = "alter table list_par_int drop partitions where k1 > 5";
+        starRocksAssert.alterTable(sql);
+        Assert.assertEquals(3, olapTable.getVisiblePartitions().size());
+        String[] expectedPartitions = {"p1", "p2", "p3"};
+        Assert.assertArrayEquals(expectedPartitions, olapTable.getVisiblePartitionNames().toArray());
     }
 }

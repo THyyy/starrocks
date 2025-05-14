@@ -33,6 +33,7 @@ import com.starrocks.sql.common.StarRocksPlannerException;
 import com.starrocks.sql.optimizer.function.MetaFunctions;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import org.apache.commons.collections4.ListUtils;
@@ -201,7 +202,9 @@ public enum ScalarOperatorEvaluator {
             }
             return operator;
         } catch (Exception e) {
-            LOG.debug("failed to invoke", e);
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("failed to invoke", e);
+            }
             if (invoker.isMetaFunction) {
                 throw new StarRocksPlannerException(ErrorType.USER_ERROR, ExceptionUtils.getRootCauseMessage(e));
             }
@@ -210,6 +213,9 @@ public enum ScalarOperatorEvaluator {
     }
 
     public boolean isMonotonicFunction(CallOperator call) {
+        if (call instanceof CastOperator) {
+            return true;
+        }
         FunctionSignature signature;
         if (call.getFunction() != null) {
             Function fn = call.getFunction();
@@ -245,9 +251,11 @@ public enum ScalarOperatorEvaluator {
             return false;
         }
 
-        if (FunctionSet.DATE_FORMAT.equalsIgnoreCase(invoker.getSignature().getName())
-                || (FunctionSet.FROM_UNIXTIME.equalsIgnoreCase(invoker.getSignature().getName())
-                && operator.getChildren().size() == 2)) {
+        if ((FunctionSet.DATE_FORMAT.equalsIgnoreCase(invoker.getSignature().getName())
+                || FunctionSet.STR_TO_DATE.equalsIgnoreCase(invoker.getSignature().getName())
+                || FunctionSet.STR2DATE.equalsIgnoreCase(invoker.getSignature().getName())
+                || FunctionSet.FROM_UNIXTIME.equalsIgnoreCase(invoker.getSignature().getName()))
+                && operator.getChildren().size() == 2) {
             String pattern = operator.getChild(1).toString();
             if (pattern.isEmpty()) {
                 return true;

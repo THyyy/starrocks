@@ -175,6 +175,10 @@ public class ReorderJoinRule extends Rule {
         return rewrite(input, JoinReorderFactory.createJoinReorderCardinalityPreserving(), context);
     }
 
+    public OptExpression rewriteForDistinctJoin(OptExpression input, OptimizerContext context) {
+        return rewrite(input, JoinReorderFactory.createJoinReorderDrivingTable(), context);
+    }
+
     public OptExpression rewrite(OptExpression input, JoinReorderFactory joinReorderFactory, OptimizerContext context) {
         List<Pair<OptExpression, Pair<OptExpression, Integer>>> innerJoinTreesAndParents = Lists.newArrayList();
         extractRootInnerJoin(null, -1, input, innerJoinTreesAndParents, false);
@@ -196,6 +200,12 @@ public class ReorderJoinRule extends Rule {
                 for (JoinOrder orderAlgorithm : orderAlgorithms) {
                     newChild = enumerate(orderAlgorithm, context, child, multiJoinNode, false);
                     if (newChild.isEmpty()) {
+                        break;
+                    }
+                    // If there is no statistical information, the DP and greedy reorder algorithm are disabled,
+                    // and the query plan degenerates to the left deep tree
+                    if (Utils.hasUnknownColumnsStats(innerJoinRoot.first) &&
+                            (!FeConstants.runningUnitTest || FeConstants.isReplayFromQueryDump)) {
                         break;
                     }
                 }
@@ -249,7 +259,8 @@ public class ReorderJoinRule extends Rule {
                     enumerate(new JoinReorderDP(context), context, innerJoinRoot, multiJoinNode, true);
                 }
 
-                if (context.getSessionVariable().isCboEnableGreedyJoinReorder()) {
+                if (context.getSessionVariable().isCboEnableGreedyJoinReorder() &&
+                        multiJoinNode.getAtoms().size() <= context.getSessionVariable().getCboMaxReorderNodeUseGreedy()) {
                     enumerate(new JoinReorderGreedy(context), context, innerJoinRoot, multiJoinNode, true);
                 }
             }

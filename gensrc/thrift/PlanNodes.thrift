@@ -133,7 +133,11 @@ struct TInternalScanRange {
   12: optional bool fill_data_cache = true;
   // used for per-bucket compute optimize
   13: optional i32 bucket_sequence
-  14: optional i64 gtid
+  // skip page cache when access page data
+  14: optional bool skip_page_cache = false;
+  // skip local disk data cache when access page data
+  15: optional bool skip_disk_cache = false;
+  16: optional i64 gtid
 }
 
 enum TFileFormatType {
@@ -209,6 +213,13 @@ struct THdfsProperties {
   12: optional CloudConfiguration.TCloudConfiguration cloud_configuration
 }
 
+enum TFileScanType {
+    // broker load, stream load, except insert from files
+    LOAD,
+    FILES_INSERT,
+    FILES_QUERY
+}
+
 struct TBrokerScanRangeParams {
     1: required i8 column_separator;
     2: required i8 row_delimiter;
@@ -271,6 +282,7 @@ struct TBrokerScanRangeParams {
     30: optional i64 schema_sample_file_count
     31: optional i64 schema_sample_file_row_count
     32: optional bool flexible_column_mapping
+    33: optional TFileScanType file_scan_type
 }
 
 // Broker scan range
@@ -412,6 +424,8 @@ struct THdfsScanRange {
     30: optional Types.TTableId table_id;
 
     31:optional TDeletionVectorDescriptor deletion_vector_descriptor
+
+    32: optional string candidate_node
 }
 
 struct TBinlogScanRange {
@@ -558,6 +572,7 @@ struct TVectorSearchOptions {
   8: optional bool use_ivfpq;
   9: optional double pq_refine_factor;
   10: optional double k_factor;
+  11: optional i32 vector_slot_id;
 }
 
 enum SampleMethod {
@@ -606,6 +621,13 @@ struct TOlapScanNode {
 
   40: optional TVectorSearchOptions vector_search_options
   41: optional TTableSampleOptions sample_options;
+
+  //back pressure
+  50: optional bool enable_topn_filter_back_pressure
+  51: optional i32 back_pressure_max_rounds
+  52: optional i64 back_pressure_throttle_time
+  53: optional i64 back_pressure_throttle_time_upper_bound
+  54: optional i64 back_pressure_num_rows
 }
 
 struct TJDBCScanNode {
@@ -639,6 +661,13 @@ struct TLakeScanNode {
   32: optional bool output_chunk_by_bucket
   33: optional bool output_asc_hint
   34: optional bool partition_order_hint
+
+  //back pressure
+  38: optional bool enable_topn_filter_back_pressure
+  39: optional i32 back_pressure_max_rounds
+  40: optional i64 back_pressure_throttle_time
+  41: optional i64 back_pressure_throttle_time_upper_bound
+  42: optional i64 back_pressure_num_rows
 }
 
 struct TEqJoinCondition {
@@ -722,6 +751,7 @@ struct THashJoinNode {
   55: optional bool interpolate_passthrough = false
   56: optional bool late_materialization = false
   57: optional bool enable_partition_hash_join = false
+  58: optional bool is_skew_join = false
 }
 
 struct TMergeJoinNode {
@@ -789,18 +819,6 @@ enum TAggregationOp {
   CUME_DIST,
   PERCENT_RANK
 }
-
-//struct TAggregateFunctionCall {
-  // The aggregate function to call.
-//  1: required Types.TFunction fn
-
-  // The input exprs to this aggregate function
-//  2: required list<Exprs.TExpr> input_exprs
-
-  // If set, this aggregate function udf has varargs and this is the index for the
-  // first variable argument.
-//  3: optional i32 vararg_start_idx
-//}
 
 struct TAggregationNode {
   1: optional list<Exprs.TExpr> grouping_exprs
@@ -875,6 +893,12 @@ enum TTopNType {
   DENSE_RANK
 }
 
+enum TLateMaterializeMode {
+  AUTO,
+  ALWAYS,
+  NEVER,
+}
+
 struct TSortNode {
   1: required TSortInfo sort_info
   // Indicates whether the backend service should use topn vs. sorting
@@ -914,6 +938,7 @@ struct TSortNode {
   32: optional list<Exprs.TExpr> pre_agg_exprs;
   33: optional list<Types.TSlotId> pre_agg_output_slot_id;
   34: optional bool pre_agg_insert_local_shuffle;
+  40: optional TLateMaterializeMode parallel_merge_late_materialize_mode;
 }
 
 enum TAnalyticWindowType {
@@ -1022,6 +1047,11 @@ struct TMergeNode {
   3: required list<list<Exprs.TExpr>> const_expr_lists
 }
 
+enum TLocalExchangerType {
+  PASSTHROUGH = 0,
+  DIRECT = 1
+}
+
 struct TUnionNode {
     // A UnionNode materializes all const/result exprs into this tuple.
     1: required Types.TTupleId tuple_id
@@ -1034,6 +1064,8 @@ struct TUnionNode {
     4: required i64 first_materialized_child_idx
     // For pass through child, the slot map is union slot id -> child slot id
     20: optional list<map<Types.TSlotId, Types.TSlotId>> pass_through_slot_maps
+    // union node' local exchanger type with parent node, default is PASSTHROUGH
+    21: optional TLocalExchangerType local_exchanger_type
 }
 
 struct TIntersectNode {
@@ -1046,6 +1078,8 @@ struct TIntersectNode {
     3: required list<list<Exprs.TExpr>> const_expr_lists
     // Index of the first child that needs to be materialized.
     4: required i64 first_materialized_child_idx
+    
+    5: optional bool has_outer_join_child
 }
 
 struct TExceptNode {
@@ -1072,6 +1106,7 @@ struct TExchangeNode {
   // Sender's partition type
   4: optional Partitions.TPartitionType partition_type;
   5: optional bool enable_parallel_merge
+  6: optional TLateMaterializeMode parallel_merge_late_materialize_mode;
 }
 
 // This contains all of the information computed by the plan as part of the resource
@@ -1187,6 +1222,7 @@ struct TMetaScanNode {
     // column id to column name
     1: optional map<i32, string> id_to_names
     2: optional list<Descriptors.TColumn> columns
+    3: optional i32 low_cardinality_threshold;
 }
 
 struct TDecodeNode {
@@ -1204,6 +1240,7 @@ struct TTableFunctionNode {
     2: optional list<Types.TSlotId> param_columns
     3: optional list<Types.TSlotId> outer_columns
     4: optional list<Types.TSlotId> fn_result_columns
+    5: optional bool fn_result_required
 }
 
 struct TConnectorScanNode {  

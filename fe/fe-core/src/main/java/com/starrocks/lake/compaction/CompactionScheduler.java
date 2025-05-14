@@ -30,8 +30,11 @@ import com.starrocks.common.StarRocksException;
 import com.starrocks.common.util.Daemon;
 import com.starrocks.common.util.concurrent.lock.LockType;
 import com.starrocks.common.util.concurrent.lock.Locker;
+import com.starrocks.lake.LakeAggregator;
 import com.starrocks.lake.LakeTablet;
+import com.starrocks.proto.AggregateCompactRequest;
 import com.starrocks.proto.CompactRequest;
+import com.starrocks.proto.ComputeNodePB;
 import com.starrocks.rpc.BrpcProxy;
 import com.starrocks.rpc.LakeService;
 import com.starrocks.rpc.RpcException;
@@ -64,23 +67,20 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 import javax.validation.constraints.NotNull;
 
 public class CompactionScheduler extends Daemon {
     private static final Logger LOG = LogManager.getLogger(CompactionScheduler.class);
     private static final String HOST_NAME = FrontendOptions.getLocalHostAddress();
     private static final long LOOP_INTERVAL_MS = 1000L;
-    private static final long MIN_COMPACTION_INTERVAL_MS_ON_SUCCESS = LOOP_INTERVAL_MS * 10;
-    private static final long MIN_COMPACTION_INTERVAL_MS_ON_FAILURE = LOOP_INTERVAL_MS * 60;
-    private static final long PARTITION_CLEAN_INTERVAL_SECOND = 30;
+    public static long PARTITION_CLEAN_INTERVAL_SECOND = 30;
     private final CompactionMgr compactionManager;
     private final SystemInfoService systemInfoService;
     private final GlobalTransactionMgr transactionMgr;
     private final GlobalStateMgr stateMgr;
     private final ConcurrentHashMap<PartitionIdentifier, CompactionJob> runningCompactions;
     private final SynchronizedCircularQueue<CompactionRecord> history;
-    private boolean finishedWaiting = false;
-    private long waitTxnId = -1;
     private long lastPartitionCleanTime;
     private Set<Long> disabledTables; // copy-on-write
 
@@ -102,35 +102,17 @@ public class CompactionScheduler extends Daemon {
 
     @Override
     protected void runOneCycle() {
-        cleanPhysicalPartition();
+        List<PartitionIdentifier> deletedPartitionIdentifiers = cleanPhysicalPartition();
 
         // Schedule compaction tasks only when this is a leader FE and all edit logs have finished replay.
-        // In order to ensure that the input rowsets of compaction still exists when doing publishing version, it is
-        // necessary to ensure that the compaction task of the same partition is executed serially, that is, the next
-        // compaction task can be executed only after the status of the previous compaction task changes to visible or
-        // canceled.
-        if (stateMgr.isLeader() && stateMgr.isReady() && allCommittedCompactionsBeforeRestartHaveFinished()) {
-            schedule();
+        if (stateMgr.isLeader() && stateMgr.isReady()) {
+            abortStaleCompaction(deletedPartitionIdentifiers);
+            scheduleNewCompaction();
             history.changeMaxSize(Config.lake_compaction_history_size);
         }
     }
 
-    // Returns true if all compaction transactions committed before this restart have finished(i.e., of VISIBLE state).
-    private boolean allCommittedCompactionsBeforeRestartHaveFinished() {
-        if (finishedWaiting) {
-            return true;
-        }
-        // Note: must call getMinActiveCompactionTxnId() before getNextTransactionId(), otherwise if there are
-        // no running transactions waitTxnId <= minActiveTxnId will always be false.
-        long minActiveTxnId = transactionMgr.getMinActiveCompactionTxnId();
-        if (waitTxnId < 0) {
-            waitTxnId = transactionMgr.getTransactionIDGenerator().getNextTransactionId();
-        }
-        finishedWaiting = waitTxnId <= minActiveTxnId;
-        return finishedWaiting;
-    }
-
-    private void schedule() {
+    private void scheduleNewCompaction() {
         // Check whether there are completed compaction jobs.
         for (Iterator<Map.Entry<PartitionIdentifier, CompactionJob>> iterator = runningCompactions.entrySet().iterator();
                 iterator.hasNext(); ) {
@@ -156,10 +138,13 @@ public class CompactionScheduler extends Daemon {
                     try {
                         commitCompaction(partition, job,
                                 taskResult == CompactionTask.TaskResult.PARTIAL_SUCCESS /* forceCommit */);
-                        assert job.transactionHasCommitted();
+                        if (!job.transactionHasCommitted()) { // should not happen
+                            errorMsg = String.format("Fail to commit transaction %s", job.getDebugString());
+                            LOG.error(errorMsg);
+                        }
                     } catch (Exception e) {
-                        LOG.error("Fail to commit compaction. {} error={}", job.getDebugString(), e.getMessage());
-                        errorMsg = "fail to commit transaction: " + e.getMessage();
+                        LOG.error("Fail to commit compaction, {} error={}", job.getDebugString(), e.getMessage());
+                        errorMsg = "Fail to commit transaction: " + e.getMessage();
                     }
                 } else if (taskResult == CompactionTask.TaskResult.PARTIAL_SUCCESS ||
                            taskResult == CompactionTask.TaskResult.NONE_SUCCESS) {
@@ -176,7 +161,7 @@ public class CompactionScheduler extends Daemon {
                     iterator.remove();
                     job.finish();
                     history.offer(CompactionRecord.build(job, errorMsg));
-                    compactionManager.enableCompactionAfter(partition, MIN_COMPACTION_INTERVAL_MS_ON_FAILURE);
+                    compactionManager.enableCompactionAfter(partition, Config.lake_min_compaction_interval_ms_on_failure);
                     abortTransactionIgnoreException(job, errorMsg);
                     continue;
                 }
@@ -194,7 +179,7 @@ public class CompactionScheduler extends Daemon {
                             cost / 1000, runningCompactions.size());
                 }
                 int factor = (statistics != null) ? statistics.getPunishFactor() : 1;
-                compactionManager.enableCompactionAfter(partition, MIN_COMPACTION_INTERVAL_MS_ON_SUCCESS * factor);
+                compactionManager.enableCompactionAfter(partition, Config.lake_min_compaction_interval_ms_on_success * factor);
             }
         }
 
@@ -223,6 +208,19 @@ public class CompactionScheduler extends Daemon {
         }
     }
 
+    private void abortStaleCompaction(List<PartitionIdentifier> deletedCompactionIdentifiers) {
+        if (deletedCompactionIdentifiers == null || deletedCompactionIdentifiers.isEmpty()) {
+            return;
+        }
+
+        for (PartitionIdentifier partitionIdentifier : deletedCompactionIdentifiers) {
+            CompactionJob job = runningCompactions.get(partitionIdentifier);
+            if (job != null) {
+                job.abort();
+            }
+        }
+    }
+
     private void abortTransactionIgnoreException(CompactionJob job, String reason) {
         try {
             List<TabletCommitInfo> finishedTablets = job.buildTabletCommitInfo();
@@ -244,19 +242,26 @@ public class CompactionScheduler extends Daemon {
         return aliveComputeNodes.size() * 16;
     }
 
-    private void cleanPhysicalPartition() {
+    // return deleted partition
+    private List<PartitionIdentifier> cleanPhysicalPartition() {
         long now = System.currentTimeMillis();
         if (now - lastPartitionCleanTime >= PARTITION_CLEAN_INTERVAL_SECOND * 1000L) {
-            compactionManager.getAllPartitions()
+            List<PartitionIdentifier> deletedPartitionIdentifiers = compactionManager.getAllPartitions()
                     .stream()
                     .filter(p -> !MetaUtils.isPhysicalPartitionExist(stateMgr, p.getDbId(), p.getTableId(), p.getPartitionId()))
-                    .filter(p -> !runningCompactions.containsKey(p)) // Ignore those partitions in runningCompactions
-                    .forEach(compactionManager::removePartition);
+                    .collect(Collectors.toList());
+
+            // ignore those partitions in runningCompactions
+            deletedPartitionIdentifiers
+                    .stream()
+                    .filter(p -> !runningCompactions.containsKey(p)).forEach(compactionManager::removePartition);
             lastPartitionCleanTime = now;
+            return deletedPartitionIdentifiers;
         }
+        return null;
     }
 
-    private CompactionJob startCompaction(PartitionStatisticsSnapshot partitionStatisticsSnapshot) {
+    protected CompactionJob startCompaction(PartitionStatisticsSnapshot partitionStatisticsSnapshot) {
         PartitionIdentifier partitionIdentifier = partitionStatisticsSnapshot.getPartition();
         Database db = stateMgr.getLocalMetastore().getDb(partitionIdentifier.getDbId());
         if (db == null) {
@@ -280,7 +285,7 @@ public class CompactionScheduler extends Daemon {
             // Compact a table of SCHEMA_CHANGE state does not make much sense, because the compacted data
             // will not be used after the schema change job finished.
             if (table != null && table.getState() == OlapTable.OlapTableState.SCHEMA_CHANGE) {
-                compactionManager.enableCompactionAfter(partitionIdentifier, MIN_COMPACTION_INTERVAL_MS_ON_FAILURE);
+                compactionManager.enableCompactionAfter(partitionIdentifier, Config.lake_min_compaction_interval_ms_on_failure);
                 return null;
             }
             partition = (table != null) ? table.getPhysicalPartition(partitionIdentifier.getPartitionId()) : null;
@@ -293,7 +298,7 @@ public class CompactionScheduler extends Daemon {
 
             beToTablets = collectPartitionTablets(partition);
             if (beToTablets.isEmpty()) {
-                compactionManager.enableCompactionAfter(partitionIdentifier, MIN_COMPACTION_INTERVAL_MS_ON_FAILURE);
+                compactionManager.enableCompactionAfter(partitionIdentifier, Config.lake_min_compaction_interval_ms_on_failure);
                 return null;
             }
 
@@ -313,20 +318,28 @@ public class CompactionScheduler extends Daemon {
             locker.unLockDatabase(db.getId(), LockType.READ);
         }
 
-        long nextCompactionInterval = MIN_COMPACTION_INTERVAL_MS_ON_SUCCESS;
+        long nextCompactionInterval = Config.lake_min_compaction_interval_ms_on_success;
         CompactionJob job = new CompactionJob(db, table, partition, txnId, Config.lake_compaction_allow_partial_success);
         try {
-            List<CompactionTask> tasks = createCompactionTasks(currentVersion, beToTablets, txnId,
-                    job.getAllowPartialSuccess(), partitionStatisticsSnapshot.getPriority());
-            for (CompactionTask task : tasks) {
+            if (table.enablePartitionAggregation()) {
+                CompactionTask task = createAggregateCompactionTask(currentVersion, beToTablets, txnId,
+                        partitionStatisticsSnapshot.getPriority());
                 task.sendRequest();
+                job.setAggregateTask(task);
+                LOG.debug("Create aggregate compaction task. {}", job.getDebugString());
+            } else {
+                List<CompactionTask> tasks = createCompactionTasks(currentVersion, beToTablets, txnId,
+                        job.getAllowPartialSuccess(), partitionStatisticsSnapshot.getPriority());
+                for (CompactionTask task : tasks) {
+                    task.sendRequest();
+                }
+                job.setTasks(tasks);
             }
-            job.setTasks(tasks);
             return job;
         } catch (Exception e) {
             LOG.error(e.getMessage(), e);
             partition.setMinRetainVersion(0);
-            nextCompactionInterval = MIN_COMPACTION_INTERVAL_MS_ON_FAILURE;
+            nextCompactionInterval = Config.lake_min_compaction_interval_ms_on_failure;
             abortTransactionIgnoreError(job, e.getMessage());
             job.finish();
             history.offer(CompactionRecord.build(job, e.getMessage()));
@@ -362,6 +375,50 @@ public class CompactionScheduler extends Daemon {
             tasks.add(task);
         }
         return tasks;
+    }
+
+    @NotNull
+    private CompactionTask createAggregateCompactionTask(long currentVersion, Map<Long, List<Long>> beToTablets, long txnId,
+            PartitionStatistics.CompactionPriority priority)
+            throws StarRocksException, RpcException {
+        // 1. build AggregateCompactRequest
+        AggregateCompactRequest aggRequest = new AggregateCompactRequest();
+        aggRequest.requests = Lists.newArrayList();
+        aggRequest.computeNodes = Lists.newArrayList();
+
+        for (Map.Entry<Long, List<Long>> entry : beToTablets.entrySet()) {
+            ComputeNode node = systemInfoService.getBackendOrComputeNode(entry.getKey());
+            if (node == null) {
+                throw new StarRocksException("Node " + entry.getKey() + " has been dropped");
+            }
+            ComputeNodePB nodePB = new ComputeNodePB();
+            nodePB.setHost(node.getHost());
+            nodePB.setBrpcPort(node.getBrpcPort());
+            nodePB.setId(entry.getKey());
+
+            CompactRequest request = new CompactRequest();
+            request.tabletIds = entry.getValue();
+            request.txnId = txnId;
+            request.version = currentVersion;
+            request.timeoutMs = LakeService.TIMEOUT_COMPACT;
+            request.allowPartialSuccess = false;
+            request.encryptionMeta = GlobalStateMgr.getCurrentState().getKeyMgr().getCurrentKEKAsEncryptionMeta();
+            request.forceBaseCompaction = (priority == PartitionStatistics.CompactionPriority.MANUAL_COMPACT);
+            request.skipWriteTxnlog = true;
+
+            aggRequest.requests.add(request);
+            aggRequest.computeNodes.add(nodePB);
+        }
+
+        // 2. pick aggregator node and build lake serivce
+        WarehouseManager manager = GlobalStateMgr.getCurrentState().getWarehouseMgr();
+        Warehouse warehouse = manager.getCompactionWarehouse();
+        LakeAggregator aggregator = new LakeAggregator();
+        ComputeNode aggregatorNode = aggregator.chooseAggregatorNode(warehouse.getId());
+        LakeService service = BrpcProxy.getLakeService(aggregatorNode.getHost(), aggregatorNode.getBrpcPort());
+
+        // 3. build AggregateCompactionTask
+        return new AggregateCompactionTask(aggregatorNode.getId(), service, aggRequest);
     }
 
     @NotNull
@@ -428,11 +485,14 @@ public class CompactionScheduler extends Daemon {
             }
             waiter = transactionMgr.commitTransaction(db.getId(), job.getTxnId(), commitInfoList,
                     Collections.emptyList(), attachment);
+            job.getPartition().incExtraFileSize(job.getSuccessCompactInputFileSize());
         } finally {
             locker.unLockTablesWithIntensiveDbLock(db.getId(), tableIdList, LockType.WRITE);
         }
-        job.setVisibleStateWaiter(waiter);
-        job.setCommitTs(System.currentTimeMillis());
+        if (waiter != null) {
+            job.setVisibleStateWaiter(waiter);
+            job.setCommitTs(System.currentTimeMillis());
+        }
     }
 
     private void abortTransactionIgnoreError(CompactionJob job, String reason) {

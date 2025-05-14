@@ -68,7 +68,7 @@ Status IcebergDeleteBuilder::fill_skip_rowids(const ChunkPtr& chunk) const {
     const ColumnPtr& pos = chunk->get_column_by_slot_id(k_delete_file_pos.id);
     for (int i = 0; i < chunk->num_rows(); i++) {
         if (file_path->get(i).get_slice() == _params.path) {
-            _need_skip_rowids->emplace(pos->get(i).get_int64());
+            _deletion_bitmap->add_value(pos->get(i).get_int64());
         }
     }
     return Status::OK();
@@ -130,7 +130,7 @@ Status IcebergDeleteBuilder::build_parquet(const TIcebergDeleteFile& delete_file
     std::atomic<int32_t> lazy_column_coalesce_counter = 0;
     scanner_ctx->timezone = timezone;
     scanner_ctx->slot_descs = slot_descriptors;
-    scanner_ctx->iceberg_schema = &iceberg_schema;
+    scanner_ctx->lake_schema = &iceberg_schema;
     scanner_ctx->materialized_columns = std::move(columns);
     scanner_ctx->scan_range = &scan_range;
     scanner_ctx->lazy_column_coalesce_counter = &lazy_column_coalesce_counter;
@@ -147,6 +147,7 @@ Status IcebergDeleteBuilder::build_parquet(const TIcebergDeleteFile& delete_file
         RETURN_IF_ERROR(status);
         RETURN_IF_ERROR(fill_skip_rowids(chunk));
     }
+    _skip_rows_ctx->deletion_bitmap = _deletion_bitmap;
     update_delete_file_io_counter(_params.profile->runtime_profile, app_scan_stats, fs_scan_stats, cache_input_stream,
                                   shared_buffered_input_stream);
     return Status::OK();
@@ -199,6 +200,7 @@ Status IcebergDeleteBuilder::build_orc(const TIcebergDeleteFile& delete_file) co
         }
         RETURN_IF_ERROR(fill_skip_rowids(ret.value()));
     }
+    _skip_rows_ctx->deletion_bitmap = _deletion_bitmap;
     update_delete_file_io_counter(_params.profile->runtime_profile, app_scan_stats, fs_scan_stats, cache_input_stream,
                                   shared_buffered_input_stream);
     return Status::OK();
@@ -298,6 +300,16 @@ void IcebergDeleteBuilder::update_delete_file_io_counter(
                 ADD_CHILD_COUNTER(parent_profile, "MOR_DataCacheSkipReadBytes", TUnit::BYTES, prefix);
         RuntimeProfile::Counter* datacache_read_timer =
                 ADD_CHILD_TIMER(parent_profile, "MOR_DataCacheReadTimer", prefix);
+        RuntimeProfile::Counter* datacache_read_peer_counter =
+                ADD_CHILD_COUNTER(parent_profile, "MOR_DataCacheReadPeerCounter", TUnit::UNIT, prefix);
+        RuntimeProfile::Counter* datacache_read_peer_bytes =
+                ADD_CHILD_COUNTER(parent_profile, "MOR_DataCacheReadPeerBytes", TUnit::BYTES, prefix);
+        RuntimeProfile::Counter* datacache_read_peer_timer =
+                ADD_CHILD_TIMER(parent_profile, "MOR_DataCacheReadPeerTimer", prefix);
+        RuntimeProfile::Counter* datacache_skip_read_peer_counter =
+                ADD_CHILD_COUNTER(parent_profile, "MOR_DataCacheSkipReadPeerCounter", TUnit::UNIT, prefix);
+        RuntimeProfile::Counter* datacache_skip_read_peer_bytes =
+                ADD_CHILD_COUNTER(parent_profile, "MOR_DataCacheSkipReadPeerBytes", TUnit::BYTES, prefix);
         RuntimeProfile::Counter* datacache_write_counter =
                 ADD_CHILD_COUNTER(parent_profile, "MOR_DataCacheWriteCounter", TUnit::UNIT, prefix);
         RuntimeProfile::Counter* datacache_write_bytes =
@@ -321,6 +333,11 @@ void IcebergDeleteBuilder::update_delete_file_io_counter(
         COUNTER_UPDATE(datacache_read_timer, stats.read_cache_ns);
         COUNTER_UPDATE(datacache_skip_read_counter, stats.skip_read_cache_count);
         COUNTER_UPDATE(datacache_skip_read_bytes, stats.skip_read_cache_bytes);
+        COUNTER_UPDATE(datacache_read_peer_bytes, stats.read_peer_cache_bytes);
+        COUNTER_UPDATE(datacache_read_peer_counter, stats.read_peer_cache_count);
+        COUNTER_UPDATE(datacache_read_peer_timer, stats.read_peer_cache_ns);
+        COUNTER_UPDATE(datacache_skip_read_peer_counter, stats.skip_read_peer_cache_count);
+        COUNTER_UPDATE(datacache_skip_read_peer_bytes, stats.skip_read_peer_cache_bytes);
         COUNTER_UPDATE(datacache_write_counter, stats.write_cache_count);
         COUNTER_UPDATE(datacache_write_bytes, stats.write_cache_bytes);
         COUNTER_UPDATE(datacache_write_timer, stats.write_cache_ns);

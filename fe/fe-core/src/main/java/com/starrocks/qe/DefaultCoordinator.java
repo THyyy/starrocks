@@ -43,7 +43,6 @@ import com.starrocks.authentication.AuthenticationMgr;
 import com.starrocks.authorization.PrivilegeBuiltinConstants;
 import com.starrocks.catalog.FsBroker;
 import com.starrocks.catalog.ResourceGroup;
-import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Config;
 import com.starrocks.common.ErrorCode;
 import com.starrocks.common.ErrorReport;
@@ -57,8 +56,10 @@ import com.starrocks.common.profile.Tracers;
 import com.starrocks.common.util.AuditStatisticsUtil;
 import com.starrocks.common.util.DebugUtil;
 import com.starrocks.common.util.RuntimeProfile;
+import com.starrocks.connector.exception.GlobalDictNotMatchException;
 import com.starrocks.connector.exception.RemoteFileNotFoundException;
 import com.starrocks.datacache.DataCacheSelectMetrics;
+import com.starrocks.metric.MetricRepo;
 import com.starrocks.mysql.MysqlCommand;
 import com.starrocks.planner.PlanFragment;
 import com.starrocks.planner.PlanFragmentId;
@@ -167,6 +168,7 @@ public class DefaultCoordinator extends Coordinator {
     private boolean isShortCircuit = false;
     private boolean isBinaryRow = false;
 
+    private long estimatedMemCost;
     private ExecutionSchedule scheduler;
 
     public static class Factory implements Coordinator.Factory {
@@ -355,8 +357,17 @@ public class DefaultCoordinator extends Coordinator {
     }
 
     @Override
+    public TLoadJobType getLoadJobType() {
+        return jobSpec.getLoadJobType();
+    }
+
+    @Override
     public Status getExecStatus() {
         return queryStatus;
+    }
+
+    public QueryRuntimeProfile getQueryRuntimeProfile() {
+        return queryProfile;
     }
 
     @Override
@@ -396,6 +407,15 @@ public class DefaultCoordinator extends Coordinator {
     @Override
     public void setTimeoutSecond(int timeoutSecond) {
         jobSpec.setQueryTimeout(timeoutSecond);
+    }
+
+    @Override
+    public void setPredictedCost(long memBytes) {
+        this.estimatedMemCost = memBytes;
+    }
+
+    public long getPredictedCost() {
+        return estimatedMemCost;
     }
 
     @Override
@@ -467,7 +487,7 @@ public class DefaultCoordinator extends Coordinator {
     // 'Request' must contain at least a coordinator plan fragment (ie, can't
     // be for a query like 'SELECT 1').
     // A call to Exec() must precede all other member function calls.
-    public void prepareExec() throws Exception {
+    public void prepareExec() throws StarRocksException {
         if (LOG.isDebugEnabled()) {
             if (!jobSpec.getScanNodes().isEmpty()) {
                 LOG.debug("debug: in Coordinator::exec. query id: {}, planNode: {}",
@@ -502,9 +522,16 @@ public class DefaultCoordinator extends Coordinator {
     }
 
     @Override
+    public void onReleaseSlots() {
+        if (slot != null) {
+            jobSpec.getSlotProvider().cancelSlotRequirement(slot);
+            jobSpec.getSlotProvider().releaseSlot(slot);
+        }
+    }
+
+    @Override
     public void onFinished() {
-        jobSpec.getSlotProvider().cancelSlotRequirement(slot);
-        jobSpec.getSlotProvider().releaseSlot(slot);
+        onReleaseSlots();
         // for async profile, if Be doesn't report profile in time, we upload the most complete profile
         // into profile Manager here. IN other case, queryProfile.finishAllInstances just do nothing here
         queryProfile.finishAllInstances(Status.OK);
@@ -528,7 +555,7 @@ public class DefaultCoordinator extends Coordinator {
     }
 
     @Override
-    public void startScheduling(ScheduleOption option) throws Exception {
+    public void startScheduling(ScheduleOption option) throws StarRocksException, InterruptedException, RpcException {
         try (Timer timer = Tracers.watchScope(Tracers.Module.SCHEDULER, "Pending")) {
             QueryQueueManager.getInstance().maybeWait(connectContext, this);
         }
@@ -566,7 +593,10 @@ public class DefaultCoordinator extends Coordinator {
 
     @Override
     public String getSchedulerExplain() {
-        return executionDAG.getFragmentsInPreorder().stream()
+        String predict = Config.enable_query_cost_prediction ?
+                "predicted memory cost: " + getPredictedCost() + "\n" : "";
+        return predict +
+                executionDAG.getFragmentsInPreorder().stream()
                 .map(ExecutionFragment::getExplainString)
                 .collect(Collectors.joining("\n"));
     }
@@ -603,7 +633,7 @@ public class DefaultCoordinator extends Coordinator {
         queryProfile.attachInstances(executionDAG.getInstanceIds());
     }
 
-    private void prepareResultSink() throws AnalysisException {
+    private void prepareResultSink() {
         ExecutionFragment rootExecFragment = executionDAG.getRootFragment();
         long workerId = rootExecFragment.getInstances().get(0).getWorkerId();
         ComputeNode worker = coordinatorPreprocessor.getWorkerProvider().getWorkerById(workerId);
@@ -646,6 +676,7 @@ public class DefaultCoordinator extends Coordinator {
                             this::handleErrorExecution, option.doDeploy);
             scheduler.prepareSchedule(this, deployer, executionDAG);
             this.scheduler.schedule(option);
+            MetricRepo.HISTO_DEPLOY_PLAN_FRAGMENTS_LATENCY.update(ignored.getTotalTime());
             queryProfile.attachExecutionProfiles(executionDAG.getExecutions());
         } finally {
             unlock();
@@ -707,19 +738,31 @@ public class DefaultCoordinator extends Coordinator {
         return updatedStates;
     }
 
+    private boolean isInternalCancelError(String errMsg) {
+        return errMsg.equals(FeConstants.LIMIT_REACH_ERROR) || errMsg.equals(FeConstants.QUERY_FINISHED_ERROR);
+    }
+
     private void handleErrorExecution(Status status, FragmentInstanceExecState execution, Throwable failure)
             throws StarRocksException, RpcException {
-        cancelInternal(PPlanFragmentCancelReason.INTERNAL_ERROR);
         switch (Objects.requireNonNull(status.getErrorCode())) {
             case TIMEOUT:
+                cancelInternal(PPlanFragmentCancelReason.INTERNAL_ERROR);
                 throw new StarRocksException("query timeout. backend id: " + execution.getWorker().getId());
             case THRIFT_RPC_ERROR:
+                cancelInternal(PPlanFragmentCancelReason.INTERNAL_ERROR);
                 SimpleScheduler.addToBlocklist(execution.getWorker().getId());
                 throw new RpcException(
                         String.format("rpc failed with %s: %s", execution.getWorker().getHost(), status.getErrorMsg()),
                         failure);
+            case CANCELLED:
+                if (isInternalCancelError(status.getErrorMsg())) {
+                    // ignore the internal cancel error message
+                    break;
+                }
+                // fallthrough
             default:
-                throw new StarRocksException(status.getErrorMsg(), failure);
+                cancelInternal(PPlanFragmentCancelReason.INTERNAL_ERROR);
+                dealStatusToTryRetry(status);
         }
     }
 
@@ -789,7 +832,13 @@ public class DefaultCoordinator extends Coordinator {
             for (Map.Entry<Integer, RuntimeFilterDescription> kv : fragment.getBuildRuntimeFilters().entrySet()) {
                 int rid = kv.getKey();
                 RuntimeFilterDescription rf = kv.getValue();
-                if (rf.isHasRemoteTargets()) {
+                if (rf.isBroadCastJoinInSkew()) {
+                    // runtime filter coordinator need to know this rid is generated by skew join optimization
+                    // when merge runtime filter instance, it should wait not only shuffle join's rf but also boradcast rf
+                    topParams.getRuntimeFilterParams()
+                            .addToSkew_join_runtime_filters(rf.getSkew_shuffle_filter_id());
+                    rf.setBroadcastGRFSenders(broadcastGRfSenders);
+                } else if (rf.isHasRemoteTargets()) {
                     if (rf.isBroadcastJoin()) {
                         // for broadcast join, we send at most 3 copy to probers, the first arrival wins.
                         topParams.getRuntimeFilterParams().putToRuntime_filter_builder_number(rid, 1);
@@ -858,6 +907,46 @@ public class DefaultCoordinator extends Coordinator {
         }
     }
 
+    private void dealStatusToTryRetry(Status status) throws RpcException, StarRocksException {
+        if (!status.ok()) {
+            if (Strings.isNullOrEmpty(status.getErrorMsg())) {
+                status.rewriteErrorMsg();
+            }
+
+            if (status.isRemoteFileNotFound()) {
+                throw new RemoteFileNotFoundException(status.getErrorMsg());
+            }
+
+            if (status.isGlobalDictNotMatch()) {
+                throw new GlobalDictNotMatchException(status.getErrorMsg());
+            }
+
+            if (status.isRpcError()) {
+                throw new RpcException("unknown", status.getErrorMsg());
+            } else {
+                String errMsg = status.getErrorMsg();
+                LOG.warn("query {} failed: {}", connectContext.queryId, errMsg);
+
+                // hide host info
+                int hostIndex = errMsg.indexOf("host");
+                if (hostIndex != -1) {
+                    errMsg = errMsg.substring(0, hostIndex);
+                }
+                InternalErrorCode ec = InternalErrorCode.INTERNAL_ERR;
+                if (status.isCancelled() &&
+                        status.getErrorMsg().equals(FeConstants.BACKEND_NODE_NOT_FOUND_ERROR)) {
+                    ec = InternalErrorCode.CANCEL_NODE_NOT_ALIVE_ERR;
+                } else if (status.isTimeout()) {
+                    ErrorReport.reportTimeoutException(
+                            ErrorCode.ERR_TIMEOUT, "Query", jobSpec.getQueryOptions().query_timeout,
+                            String.format("please increase the '%s' session variable and retry",
+                                    SessionVariable.QUERY_TIMEOUT));
+                }
+                throw new StarRocksException(ec, errMsg);
+            }
+        }
+    }
+
     @Override
     public RowBatch getNext() throws Exception {
         if (isShortCircuit) {
@@ -885,38 +974,7 @@ public class DefaultCoordinator extends Coordinator {
         } finally {
             unlock();
         }
-
-        if (!copyStatus.ok()) {
-            if (Strings.isNullOrEmpty(copyStatus.getErrorMsg())) {
-                copyStatus.rewriteErrorMsg();
-            }
-
-            if (copyStatus.isRemoteFileNotFound()) {
-                throw new RemoteFileNotFoundException(copyStatus.getErrorMsg());
-            }
-
-            if (copyStatus.isRpcError()) {
-                throw new RpcException("unknown", copyStatus.getErrorMsg());
-            } else {
-                String errMsg = copyStatus.getErrorMsg();
-                LOG.warn("query {} failed: {}", connectContext.queryId, errMsg);
-
-                // hide host info
-                int hostIndex = errMsg.indexOf("host");
-                if (hostIndex != -1) {
-                    errMsg = errMsg.substring(0, hostIndex);
-                }
-                InternalErrorCode ec = InternalErrorCode.INTERNAL_ERR;
-                if (copyStatus.isCancelled() &&
-                        copyStatus.getErrorMsg().equals(FeConstants.BACKEND_NODE_NOT_FOUND_ERROR)) {
-                    ec = InternalErrorCode.CANCEL_NODE_NOT_ALIVE_ERR;
-                } else if (copyStatus.isTimeout()) {
-                    ErrorReport.reportTimeoutException(
-                            ErrorCode.ERR_TIMEOUT, "Query", jobSpec.getQueryOptions().query_timeout, errMsg);
-                }
-                throw new StarRocksException(ec, errMsg);
-            }
-        }
+        dealStatusToTryRetry(copyStatus);
 
         if (resultBatch.isEos()) {
             this.returnedAllResults = true;
@@ -1036,63 +1094,31 @@ public class DefaultCoordinator extends Coordinator {
         // The exec status would affect query schedule, so it must be updated no matter what exceptions happen.
         // Otherwise, the query might hang until timeout
         if (!execState.updateExecStatus(params)) {
+            LOG.info("duplicate report fragment exec status, query id: {}, instance id: {}, backend id: {}, " +
+                            "status: {}, exec state: {}",
+                    DebugUtil.printId(jobSpec.getQueryId()),
+                    DebugUtil.printId(params.getFragment_instance_id()),
+                    params.getBackend_id(), params.status, execState.getState());
             return;
         }
 
-        String instanceId = DebugUtil.printId(params.getFragment_instance_id());
+        final String instanceId = DebugUtil.printId(params.getFragment_instance_id());
+        final boolean isDone = params.isDone();
         // Create a CompletableFuture chain for handling updates
-        CompletableFuture<Void> future = CompletableFuture.completedFuture(null)
+        final CompletableFuture<Void> future = CompletableFuture.completedFuture(null)
                 .thenRun(() -> {
                     try {
-                        queryProfile.updateProfile(execState, params);
-                        execState.updateRunningProfile(params);
+                        updateRuntimeProfile(params, execState, instanceId);
                     } catch (Throwable e) {
-                        LOG.warn("update profile failed {}", instanceId, e);
+                        LOG.warn("update runtime profile failed {}", instanceId, e);
                     }
                 })
                 .thenRun(() -> {
-                    try {
-                        lock();
-                        queryProfile.updateLoadChannelProfile(params);
-                    } catch (Throwable e) {
-                        LOG.warn("update load channel profile failed {}", instanceId, e);
-                    } finally {
-                        unlock();
+                    // update load info if it's a isDone rpc
+                    if (isDone && execState.isFinished()) {
+                        updateFinishInstance(params, execState, instanceId);
                     }
                 })
-                .thenRun(() -> {
-                    Status status = new Status(params.status);
-                    if (!(returnedAllResults && status.isCancelled()) && !status.ok()) {
-                        ConnectContext ctx = connectContext;
-                        if (ctx != null) {
-                            ctx.setErrorCodeOnce(status.getErrorCodeString());
-                        }
-                        LOG.warn("exec state report failed status={}, query_id={}, instance_id={}, backend_id={}",
-                                status, DebugUtil.printId(jobSpec.getQueryId()),
-                                DebugUtil.printId(params.getFragment_instance_id()),
-                                params.getBackend_id());
-                        updateStatus(status, params.getFragment_instance_id());
-                    }
-                })
-                .thenRun(() -> {
-                    if (execState.isFinished()) {
-                        try {
-                            lock();
-                            queryProfile.updateLoadInformation(execState, params);
-                        } catch (Throwable e) {
-                            LOG.warn("update load information failed {}", instanceId, e);
-                        } finally {
-                            unlock();
-                        }
-                    }
-                })
-                .thenRun(() -> {
-                    // NOTE: it's critical for query execution, and must be put after the profile update
-                    if (execState.isFinished()) {
-                        queryProfile.finishInstance(params.getFragment_instance_id());
-                    }
-                })
-                .thenRun(() -> updateJobProgress(params))
                 .handle((result, ex) -> {
                     // all block are independent, continue the execution no matter what exception happen
                     if (ex != null) {
@@ -1107,6 +1133,77 @@ public class DefaultCoordinator extends Coordinator {
         } catch (Exception e) {
             LOG.warn("Error occurred during updateFragmentExecStatus {}", instanceId, e);
         }
+    }
+
+    /**
+     * Update runtime profile and load profile no matter the input params is a finish or runtime profile
+     */
+    private void updateRuntimeProfile(TReportExecStatusParams params,
+                                      FragmentInstanceExecState execState,
+                                      String instanceId) {
+        // update profile
+        try {
+            queryProfile.updateProfile(execState, params);
+            execState.updateRunningProfile(params);
+        } catch (Throwable e) {
+            LOG.warn("update profile failed {}", instanceId, e);
+        }
+
+        // update load profile
+        try {
+            lock();
+            queryProfile.updateLoadChannelProfile(params);
+        } catch (Throwable e) {
+            LOG.warn("update load channel profile failed {}", instanceId, e);
+        } finally {
+            unlock();
+        }
+
+        // update job progress
+        try {
+            updateJobProgress(params);
+        } catch (Throwable e) {
+            LOG.warn("update job progress failed {}", instanceId, e);
+        }
+
+        // update status
+        Status status = new Status(params.status);
+        if (!(returnedAllResults && status.isCancelled()) && !status.ok()) {
+            ConnectContext ctx = connectContext;
+            if (ctx != null) {
+                ctx.setErrorCodeOnce(status.getErrorCodeString());
+            }
+            LOG.warn("exec state report failed status={}, query_id={}, instance_id={}, backend_id={}",
+                    status, DebugUtil.printId(jobSpec.getQueryId()),
+                    DebugUtil.printId(params.getFragment_instance_id()),
+                    params.getBackend_id());
+            updateStatus(status, params.getFragment_instance_id());
+        }
+    }
+
+    /**
+     * Update the instance only if the instance is finished.
+     */
+    private void updateFinishInstance(TReportExecStatusParams params,
+                                      FragmentInstanceExecState execState,
+                                      String instanceId) {
+        // For DML jobs, finishInstance is ensured to be called only after instance finished and should not be
+        // called repeatedly. Otherwise, it will cause commit with wrong commit info.
+        if (jobSpec.isLoadType() && execState.getState().isFinished() && queryProfile.isFinished()) {
+            throw new RuntimeException(String.format("updateFinishInstance called after fragment is finished:%s, query_id:%s",
+                    instanceId, DebugUtil.printId(params.getQuery_id())));
+        }
+        try {
+            lock();
+            queryProfile.updateLoadInformation(execState, params);
+        } catch (Throwable e) {
+            LOG.warn("update load information failed {}", instanceId, e);
+        } finally {
+            unlock();
+        }
+
+        // NOTE: it's critical for query execution, and must be put after the profile update
+        queryProfile.finishInstance(params.getFragment_instance_id());
     }
 
     @Override
@@ -1322,16 +1419,25 @@ public class DefaultCoordinator extends Coordinator {
     }
 
     @Override
+    public long getCurrentWarehouseId() {
+        return connectContext.getCurrentWarehouseId();
+    }
+
+    @Override
     public String getResourceGroupName() {
         return jobSpec.getResourceGroup() == null ? ResourceGroup.DEFAULT_RESOURCE_GROUP_NAME :
                 jobSpec.getResourceGroup().getName();
     }
 
-    private void execShortCircuit() throws Exception {
+    private void execShortCircuit() throws StarRocksException {
         shortCircuitExecutor.exec();
     }
 
     public ResultReceiver getReceiver() {
         return receiver;
+    }
+
+    public ConnectContext getConnectContext() {
+        return connectContext;
     }
 }

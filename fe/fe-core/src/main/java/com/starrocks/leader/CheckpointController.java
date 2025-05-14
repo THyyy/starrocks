@@ -63,12 +63,9 @@ import org.apache.logging.log4j.Logger;
 import org.apache.thrift.TException;
 
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -77,6 +74,7 @@ import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * CheckpointController daemon is running on master node. handle the checkpoint work for starrocks.
@@ -86,8 +84,8 @@ public class CheckpointController extends FrontendDaemon {
     private static final int PUT_TIMEOUT_SECOND = 3600;
     private static final int CONNECT_TIMEOUT_SECOND = 1;
     private static final int READ_TIMEOUT_SECOND = 1;
+    private static final ReentrantReadWriteLock RW_LOCK = new ReentrantReadWriteLock();
 
-    private String imageDir;
     private final Journal journal;
     // subDir comes after base imageDir, to distinguish different module's image dir
     private final String subDir;
@@ -108,23 +106,47 @@ public class CheckpointController extends FrontendDaemon {
         nodesToPushImage = new HashSet<>();
     }
 
+    public static void exclusiveLock() {
+        RW_LOCK.writeLock().lock();
+    }
+
+    public static void exclusiveUnlock() {
+        RW_LOCK.writeLock().unlock();
+    }
+
     @Override
     protected void runAfterCatalogReady() {
-        init();
-
-        long imageJournalId = 0;
-        long maxJournalId = 0;
+        RW_LOCK.readLock().lock();
         try {
-            Storage storage = new Storage(imageDir);
+            runCheckpointController();
+        } finally {
+            RW_LOCK.readLock().unlock();
+        }
+    }
+
+    protected void runCheckpointController() {
+        // ignore return value in normal checkpoint controller
+        runCheckpointControllerWithIds(getImageJournalId(), getCheckpointJournalId());
+    }
+
+    public long getCheckpointJournalId() {
+        return journal.getFinalizedJournalId();
+    }
+
+    public long getImageJournalId() {
+        long imageJournalId = 0;
+        try {
+            Storage storage = new Storage(MetaHelper.getImageFileDir(belongToGlobalStateMgr));
             // get max image version
             imageJournalId = storage.getImageJournalId();
-            // get max finalized journal id
-            maxJournalId = journal.getFinalizedJournalId();
-            LOG.info("checkpoint imageJournalId {}, logJournalId {}", imageJournalId, maxJournalId);
         } catch (IOException e) {
             LOG.error("Failed to get storage info", e);
-            return;
         }
+        return imageJournalId;
+    }
+
+    public Pair<Boolean, String> runCheckpointControllerWithIds(long imageJournalId, long maxJournalId) {
+        LOG.info("checkpoint imageJournalId {}, logJournalId {}", imageJournalId, maxJournalId);
 
         // Step 1: create image
         Pair<Boolean, String> createImageRet = Pair.create(false, "");
@@ -159,10 +181,8 @@ public class CheckpointController extends FrontendDaemon {
                 || (needToPushCnt > 0 && nodesToPushImage.isEmpty())) {
             deleteOldJournals(newImageVersion);
         }
-    }
 
-    private void init() {
-        this.imageDir = GlobalStateMgr.getServingState().getImageDir() + subDir;
+        return createImageRet;
     }
 
     private Pair<Boolean, String> createImage() {
@@ -182,7 +202,12 @@ public class CheckpointController extends FrontendDaemon {
         }
 
         try {
-            Pair<Boolean, String> ret = result.poll(Config.checkpoint_timeout_seconds, TimeUnit.SECONDS);
+            long startNs = System.nanoTime();
+            Pair<Boolean, String> ret = null;
+            while (ret == null
+                    && System.nanoTime() - startNs < TimeUnit.SECONDS.toNanos(Config.checkpoint_timeout_seconds)) {
+                ret = result.poll(1, TimeUnit.SECONDS);
+            }
             if (ret == null) {
                 LOG.warn("do checkpoint timeout on node: {}", workerNodeName);
                 return Pair.create(false, workerNodeName);
@@ -209,18 +234,11 @@ public class CheckpointController extends FrontendDaemon {
             return;
         }
 
-        try {
-            downloadImage(ImageFormatVersion.v1, imageDir);
-        } catch (IOException e) {
-            if (belongToGlobalStateMgr && e instanceof FileNotFoundException) {
-                LOG.warn("download image of v1 version failed, ignore", e);
-            } else {
-                throw e;
-            }
-        }
-
         if (belongToGlobalStateMgr) {
-            downloadImage(ImageFormatVersion.v2, imageDir + "/v2");
+            downloadImage(ImageFormatVersion.v2, MetaHelper.getImageFileDir(true));
+            GlobalStateMgr.getCurrentState().setImageJournalId(journalId);
+        } else {
+            downloadImage(ImageFormatVersion.v1, MetaHelper.getImageFileDir(false));
         }
     }
 
@@ -239,11 +257,7 @@ public class CheckpointController extends FrontendDaemon {
         MetaHelper.downloadImageFile(url, MetaService.DOWNLOAD_TIMEOUT_SECOND * 1000, String.valueOf(journalId), dir);
 
         // clean the old images
-        String dirToClean = imageDir;
-        if (imageFormatVersion == ImageFormatVersion.v2) {
-            dirToClean = imageDir + "/v2";
-        }
-        MetaCleaner cleaner = new MetaCleaner(dirToClean);
+        MetaCleaner cleaner = new MetaCleaner(imageDir);
         cleaner.clean();
     }
 
@@ -266,7 +280,7 @@ public class CheckpointController extends FrontendDaemon {
         }
 
         // put the leader node to the end
-        workers.add(GlobalStateMgr.getServingState().getNodeMgr().getSelfFe());
+        workers.add(GlobalStateMgr.getServingState().getNodeMgr().getMySelf());
 
         for (Frontend frontend : workers) {
             LOG.info("frontend: {} heap used percent: {}", frontend.getNodeName(), frontend.getHeapUsedPercent());
@@ -357,27 +371,26 @@ public class CheckpointController extends FrontendDaemon {
                 continue;
             }
 
-            boolean allFormatSuccess = true;
-            for (ImageFormatVersion formatVersion : getImageFormatVersionToPush(imageVersion)) {
-                String url = "http://" + NetUtils.getHostPortInAccessibleFormat(frontend.getHost(), Config.http_port)
-                        + "/put?version=" + imageVersion
-                        + "&port=" + Config.http_port
-                        + "&subdir=" + subDir
-                        + "&for_global_state=" + belongToGlobalStateMgr
-                        + "&image_format_version=" + formatVersion.toString();
-                try {
-                    MetaHelper.httpGet(url, PUT_TIMEOUT_SECOND * 1000);
+            boolean pushSuccess = true;
+            ImageFormatVersion formatVersion = belongToGlobalStateMgr ? ImageFormatVersion.v2 : ImageFormatVersion.v1;
+            String url = "http://" + NetUtils.getHostPortInAccessibleFormat(frontend.getHost(), Config.http_port)
+                    + "/put?version=" + imageVersion
+                    + "&port=" + Config.http_port
+                    + "&subdir=" + subDir
+                    + "&for_global_state=" + belongToGlobalStateMgr
+                    + "&image_format_version=" + formatVersion.toString();
+            try {
+                MetaHelper.httpGet(url, PUT_TIMEOUT_SECOND * 1000);
 
-                    LOG.info("push image successfully, url = {}", url);
-                    if (MetricRepo.hasInit) {
-                        MetricRepo.COUNTER_IMAGE_PUSH.increase(1L);
-                    }
-                } catch (IOException e) {
-                    allFormatSuccess = false;
-                    LOG.error("Exception when pushing image file. url = {}", url, e);
+                LOG.info("push image successfully, url = {}", url);
+                if (MetricRepo.hasInit) {
+                    MetricRepo.COUNTER_IMAGE_PUSH.increase(1L);
                 }
+            } catch (IOException e) {
+                pushSuccess = false;
+                LOG.error("Exception when pushing image file. url = {}", url, e);
             }
-            if (allFormatSuccess) {
+            if (pushSuccess) {
                 iterator.remove();
                 successPushedCnt++;
             }
@@ -385,21 +398,6 @@ public class CheckpointController extends FrontendDaemon {
 
         LOG.info("push image.{} from subdir [{}] to other nodes. totally {} nodes, push succeeded {} nodes",
                 imageVersion, subDir, needToPushCnt, successPushedCnt);
-    }
-
-    private List<ImageFormatVersion> getImageFormatVersionToPush(long imageVersion) {
-        List<ImageFormatVersion> result = new ArrayList<>();
-        if (belongToGlobalStateMgr) {
-            // for global state mgr, the creation of v1 format image may fail, so check the existence of image file
-            if (Files.exists(Path.of(imageDir + "/image." + imageVersion))) {
-                result.add(ImageFormatVersion.v1);
-            }
-            result.add(ImageFormatVersion.v2);
-        } else {
-            // for staros mgr, there is only v1 format image.
-            result.add(ImageFormatVersion.v1);
-        }
-        return result;
     }
 
     private long getMinReplayedJournalId() {
@@ -468,5 +466,9 @@ public class CheckpointController extends FrontendDaemon {
         if (startTime > workerSelectedTime) {
             cancelCheckpoint(nodeName, "worker restarted");
         }
+    }
+
+    public Journal getJournal() {
+        return journal;
     }
 }

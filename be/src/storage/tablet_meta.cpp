@@ -69,6 +69,12 @@ Status TabletMeta::create(const TCreateTabletReq& request, const TabletUid& tabl
         (*tablet_meta)->set_binlog_config(binlog_config);
     }
 
+    if (request.__isset.flat_json_config) {
+        FlatJsonConfig flat_json_config;
+        flat_json_config.update(request.flat_json_config);
+        (*tablet_meta)->set_flat_json_config(flat_json_config);
+    }
+
     return Status::OK();
 }
 
@@ -173,7 +179,7 @@ Status TabletMeta::reset_tablet_uid(const string& file_path) {
     tmp_tablet_meta.to_meta_pb(&tmp_tablet_meta_pb);
     *(tmp_tablet_meta_pb.mutable_tablet_uid()) = TabletUid::gen_uid().to_proto();
     if (res = save(file_path, tmp_tablet_meta_pb); !res.ok()) {
-        LOG(FATAL) << "fail to save tablet meta pb to " << file_path << ": " << res;
+        LOG(WARNING) << "fail to save tablet meta pb to " << file_path << ": " << res;
         return res;
     }
     return res;
@@ -203,12 +209,16 @@ Status TabletMeta::save_meta(DataDir* data_dir, bool skip_tablet_schema) {
 }
 
 void TabletMeta::save_tablet_schema(const TabletSchemaCSPtr& tablet_schema, std::vector<RowsetSharedPtr>& committed_rs,
-                                    DataDir* data_dir) {
+                                    DataDir* data_dir, bool is_primary_key) {
     std::unique_lock wrlock(_meta_lock);
     _schema = tablet_schema;
     for (auto& rs : committed_rs) {
         RowsetMetaPB meta_pb;
         rs->rowset_meta()->get_full_meta_pb(&meta_pb);
+        if (is_primary_key && rs->rowset_meta()->rowset_state() == RowsetStatePB::VISIBLE) {
+            LOG(INFO) << "skip visible rowset: " << rs->rowset_meta()->rowset_id() << " of tablet: " << tablet_id();
+            continue;
+        }
         Status res = RowsetMetaManager::save(data_dir->get_meta(), tablet_uid(), meta_pb);
         LOG_IF(FATAL, !res.ok()) << "failed to save rowset " << rs->rowset_id() << " to local meta store: " << res;
         rs->rowset_meta()->set_skip_tablet_schema(false);
@@ -364,6 +374,12 @@ void TabletMeta::init_from_pb(TabletMetaPB* ptablet_meta_pb, bool use_tablet_sch
     if (tablet_meta_pb.has_source_schema()) {
         _source_schema = std::make_shared<const TabletSchema>(tablet_meta_pb.source_schema());
     }
+
+    if (tablet_meta_pb.has_flat_json_config()) {
+        FlatJsonConfig flat_json_config;
+        flat_json_config.update(tablet_meta_pb.flat_json_config());
+        set_flat_json_config(flat_json_config);
+    }
 }
 
 void TabletMeta::to_meta_pb(TabletMetaPB* tablet_meta_pb, bool skip_tablet_schema) {
@@ -436,6 +452,10 @@ void TabletMeta::to_meta_pb(TabletMetaPB* tablet_meta_pb, bool skip_tablet_schem
 
     if (_source_schema != nullptr) {
         _source_schema->to_schema_pb(tablet_meta_pb->mutable_source_schema());
+    }
+
+    if (_flat_json_config != nullptr) {
+        _flat_json_config->to_pb(tablet_meta_pb->mutable_flat_json_config());
     }
 }
 

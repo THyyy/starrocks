@@ -15,6 +15,7 @@
 package com.starrocks.sql.analyzer;
 
 import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
@@ -219,9 +220,11 @@ public class PolymorphicFunctionAnalyzer {
             .put(FunctionSet.getAggStateName(FunctionSet.ANY_VALUE), types -> types[0])
             .put(FunctionSet.getAggStateUnionName(FunctionSet.ANY_VALUE), types -> types[0])
             .put(FunctionSet.getAggStateMergeName(FunctionSet.ANY_VALUE), types -> types[0])
+            .put(FunctionSet.getAggStateIfName(FunctionSet.ANY_VALUE), types -> types[0])
             .put(FunctionSet.getAggStateName(FunctionSet.ARRAY_AGG), new ArrayAggStateDeduce())
             .put(FunctionSet.getAggStateUnionName(FunctionSet.ARRAY_AGG), types -> types[0])
             .put(FunctionSet.getAggStateMergeName(FunctionSet.ARRAY_AGG), new ArrayAggMergeDeduce())
+            .put(FunctionSet.getAggStateIfName(FunctionSet.ARRAY_AGG), types -> types[0])
             .put(FunctionSet.MAP_AGG, new MapAggDeduce())
             .build();
 
@@ -232,7 +235,16 @@ public class PolymorphicFunctionAnalyzer {
         }
 
         Type[] resolvedArgTypes = resolveArgTypes(fn, inputArgTypes);
-        Type newRetType = deduce.apply(resolvedArgTypes);
+        Type newRetType;
+        try {
+            newRetType = deduce.apply(resolvedArgTypes);
+        } catch (SemanticException e) {
+            String errMsg = e.getMessage();
+            if (!Strings.isNullOrEmpty(fn.functionName())) {
+                errMsg = errMsg.substring(0, errMsg.length() - 1) + " in the function [" + fn.functionName() + "]";
+            }
+            throw  new SemanticException(errMsg);
+        }
 
         // change null type into boolean type
         resolvedArgTypes = AnalyzerUtils.replaceNullTypes2Booleans(resolvedArgTypes);

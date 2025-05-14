@@ -44,6 +44,7 @@ import com.starrocks.analysis.ArithmeticExpr;
 import com.starrocks.analysis.FunctionName;
 import com.starrocks.builtins.VectorizedBuiltinFunctions;
 import com.starrocks.catalog.combinator.AggStateCombinator;
+import com.starrocks.catalog.combinator.AggStateIf;
 import com.starrocks.catalog.combinator.AggStateMergeCombinator;
 import com.starrocks.catalog.combinator.AggStateUnionCombinator;
 import com.starrocks.catalog.combinator.AggStateUtils;
@@ -157,7 +158,6 @@ public class FunctionSet {
 
     // Vector Index functions:
     public static final String APPROX_COSINE_SIMILARITY = "approx_cosine_similarity";
-    public static final String APPROX_COSINE_SIMILARITY_NORM = "approx_cosine_similarity_norm";
     public static final String APPROX_L2_DISTANCE = "approx_l2_distance";
 
     // Geo functions:
@@ -219,6 +219,7 @@ public class FunctionSet {
     public static final String TRIM = "trim";
     public static final String UPPER = "upper";
     public static final String SUBSTRING_INDEX = "substring_index";
+    public static final String FIELD = "field";
 
     // Json functions:
     public static final String JSON_ARRAY = "json_array";
@@ -253,6 +254,7 @@ public class FunctionSet {
     public static final String APPROX_COUNT_DISTINCT = "approx_count_distinct";
     public static final String APPROX_COUNT_DISTINCT_HLL_SKETCH = "approx_count_distinct_hll_sketch";
     public static final String DS_HLL_COUNT_DISTINCT = "ds_hll_count_distinct";
+    public static final String DS_THETA_COUNT_DISTINCT = "ds_theta_count_distinct";
     public static final String APPROX_TOP_K = "approx_top_k";
     public static final String AVG = "avg";
     public static final String COUNT = "count";
@@ -265,6 +267,7 @@ public class FunctionSet {
     public static final String MIN_BY_V2 = "min_by_v2";
     public static final String MIN = "min";
     public static final String PERCENTILE_APPROX = "percentile_approx";
+    public static final String PERCENTILE_APPROX_WEIGHTED = "percentile_approx_weighted";
     public static final String PERCENTILE_CONT = "percentile_cont";
     public static final String PERCENTILE_DISC = "percentile_disc";
     public static final String LC_PERCENTILE_DISC = "percentile_disc_lc";
@@ -305,6 +308,7 @@ public class FunctionSet {
     public static final String BITMAP_EMPTY = "bitmap_empty";
     public static final String BITMAP_FROM_STRING = "bitmap_from_string";
     public static final String BITMAP_HASH = "bitmap_hash";
+    public static final String BITMAP_HASH64 = "bitmap_hash64";
     public static final String BITMAP_HAS_ANY = "bitmap_has_any";
     public static final String BITMAP_INTERSECT = "bitmap_intersect";
     public static final String BITMAP_MAX = "bitmap_max";
@@ -358,6 +362,7 @@ public class FunctionSet {
     public static final String ARRAY_GENERATE = "array_generate";
 
     public static final String ARRAY_TO_BITMAP = "array_to_bitmap";
+    public static final String ARRAY_FLATTEN = "array_flatten";
 
     // Bit functions:
     public static final String BITAND = "bitand";
@@ -533,12 +538,13 @@ public class FunctionSet {
     public static final String SESSION_USER = "session_user";
 
     public static final String CURRENT_USER = "current_user";
-
     public static final String CURRENT_ROLE = "current_role";
+    public static final String CURRENT_GROUP = "current_group";
 
     public static final String AGG_STATE_SUFFIX = "_state";
     public static final String AGG_STATE_UNION_SUFFIX = "_union";
     public static final String AGG_STATE_MERGE_SUFFIX = "_merge";
+    public static final String AGG_STATE_IF_SUFFIX = "_if";
 
     private static final Logger LOGGER = LogManager.getLogger(FunctionSet.class);
 
@@ -595,8 +601,8 @@ public class FunctionSet {
     // This contains the nullable functions, which cannot return NULL result directly for the NULL parameter.
     // This does not contain any user defined functions. All UDFs handle null values by themselves.
     private final ImmutableSet<String> notAlwaysNullResultWithNullParamFunctions =
-            ImmutableSet.of(IF, CONCAT_WS, IFNULL, NULLIF, NULL_OR_EMPTY, COALESCE, BITMAP_HASH, PERCENTILE_HASH,
-                    HLL_HASH, JSON_ARRAY, JSON_OBJECT, ROW, STRUCT, NAMED_STRUCT);
+            ImmutableSet.of(IF, CONCAT_WS, IFNULL, NULLIF, NULL_OR_EMPTY, COALESCE, BITMAP_HASH, BITMAP_HASH64,
+                    PERCENTILE_HASH, HLL_HASH, JSON_ARRAY, JSON_OBJECT, ROW, STRUCT, NAMED_STRUCT);
 
     // If low cardinality string column with global dict, for some string functions,
     // we could evaluate the function only with the dict content, not all string column data.
@@ -627,11 +633,13 @@ public class FunctionSet {
                     .add(FunctionSet.UTC_TIMESTAMP)
                     .add(FunctionSet.MD5_SUM)
                     .add(FunctionSet.DS_HLL_COUNT_DISTINCT)
+                    .add(FunctionSet.DS_THETA_COUNT_DISTINCT)
                     .add(FunctionSet.MD5_SUM_NUMERIC)
                     .add(FunctionSet.BITMAP_EMPTY)
                     .add(FunctionSet.HLL_EMPTY)
                     .add(FunctionSet.EXCHANGE_BYTES)
                     .add(FunctionSet.EXCHANGE_SPEED)
+                    .add(FunctionSet.FIELD)
                     .build();
 
     public static final Set<String> DECIMAL_ROUND_FUNCTIONS =
@@ -652,7 +660,6 @@ public class FunctionSet {
     public static final Set<String> VECTOR_COMPUTE_FUNCTIONS =
             ImmutableSet.<String>builder()
                     .add(APPROX_COSINE_SIMILARITY)
-                    .add(APPROX_COSINE_SIMILARITY_NORM)
                     .add(APPROX_L2_DISTANCE)
                     .build();
 
@@ -760,6 +767,7 @@ public class FunctionSet {
             .add(SESSION_USER)
             .add(CURRENT_USER)
             .add(CURRENT_ROLE)
+            .add(CURRENT_GROUP)
             .build();
 
     public static final java.util.function.Function<Type, ArrayType> APPROX_TOP_N_RET_TYPE_BUILDER =
@@ -1016,12 +1024,16 @@ public class FunctionSet {
     public void addBuiltin(AggregateFunction aggFunc) {
         addBuiltInFunction(aggFunc);
 
-        if (AggStateUtils.isSupportedAggStateFunction(aggFunc)) {
+        if (AggStateUtils.isSupportedAggStateFunction(aggFunc, false)) {
             // register `_state` combinator
             AggStateCombinator.of(aggFunc).stream().forEach(this::addBuiltInFunction);
             // register `_merge`/`_union` combinator for aggregate functions
             AggStateUnionCombinator.of(aggFunc).stream().forEach(this::addBuiltInFunction);
             AggStateMergeCombinator.of(aggFunc).stream().forEach(this::addBuiltInFunction);
+        }
+
+        if (AggStateUtils.isSupportedAggStateFunction(aggFunc, true)) {
+            AggStateIf.of(aggFunc).stream().forEach(this::addBuiltInFunction);
         }
     }
 
@@ -1037,6 +1049,10 @@ public class FunctionSet {
         return String.format("%s%s", name, AGG_STATE_MERGE_SUFFIX);
     }
 
+    public static String getAggStateIfName(String name) {
+        return String.format("%s%s", name, AGG_STATE_IF_SUFFIX);
+    }
+
     // Populate all the aggregate builtins in the globalStateMgr.
     // null symbols indicate the function does not need that step of the evaluation.
     // An empty symbol indicates a TODO for the BE to implement the function.
@@ -1044,9 +1060,6 @@ public class FunctionSet {
         // count(*)
         addBuiltin(AggregateFunction.createBuiltin(FunctionSet.COUNT,
                 new ArrayList<>(), Type.BIGINT, Type.BIGINT, false, true, true));
-
-        addBuiltin(AggregateFunction.createBuiltin(FunctionSet.COUNT_IF,
-                Lists.newArrayList(Type.BOOLEAN), Type.BIGINT, Type.BIGINT, true, true, true));
 
         // EXCHANGE_BYTES/_SPEED with various arguments
         addBuiltin(AggregateFunction.createBuiltin(EXCHANGE_BYTES,
@@ -1137,6 +1150,11 @@ public class FunctionSet {
                     Lists.newArrayList(t, Type.INT, Type.VARCHAR), Type.BIGINT, Type.VARBINARY,
                     true, false, true));
 
+            // ds_theta_count_distinct(col)
+            addBuiltin(AggregateFunction.createBuiltin(DS_THETA_COUNT_DISTINCT,
+                    Lists.newArrayList(t), Type.BIGINT, Type.VARBINARY,
+                    true, false, true));
+
             // HLL_RAW
             addBuiltin(AggregateFunction.createBuiltin(HLL_RAW,
                     Lists.newArrayList(t), Type.HLL, Type.VARBINARY,
@@ -1203,7 +1221,7 @@ public class FunctionSet {
         addBuiltin(AggregateFunction.createBuiltin(BITMAP_UNION, Lists.newArrayList(Type.BITMAP),
                 Type.BITMAP,
                 Type.BITMAP,
-                true, false, true));
+                true, true, true));
 
         // Type.VARCHAR must before all other type, so bitmap_agg(varchar) can convert to bitmap_agg(bigint)
         addBuiltin(AggregateFunction.createBuiltin(BITMAP_AGG, Lists.newArrayList(Type.BIGINT),
@@ -1274,9 +1292,9 @@ public class FunctionSet {
         // Approx top k
         registerBuiltinApproxTopKWindowFunction();
         // Dict merge
-        addBuiltin(AggregateFunction.createBuiltin(DICT_MERGE, Lists.newArrayList(Type.VARCHAR),
+        addBuiltin(AggregateFunction.createBuiltin(DICT_MERGE, Lists.newArrayList(Type.VARCHAR, Type.INT),
                 Type.VARCHAR, Type.VARCHAR, true, false, false));
-        addBuiltin(AggregateFunction.createBuiltin(DICT_MERGE, Lists.newArrayList(Type.ARRAY_VARCHAR),
+        addBuiltin(AggregateFunction.createBuiltin(DICT_MERGE, Lists.newArrayList(Type.ARRAY_VARCHAR, Type.INT),
                 Type.VARCHAR, Type.VARCHAR, true, false, false));
         // flat json meta
         addBuiltin(AggregateFunction.createBuiltin(FLAT_JSON_META, Lists.newArrayList(Type.JSON),
@@ -1544,6 +1562,14 @@ public class FunctionSet {
                 false, false, false));
         addBuiltin(AggregateFunction.createBuiltin(PERCENTILE_APPROX,
                 Lists.newArrayList(Type.DOUBLE, Type.DOUBLE, Type.DOUBLE), Type.DOUBLE, Type.VARBINARY,
+                false, false, false));
+        // percentile_approx_weighted
+        addBuiltin(AggregateFunction.createBuiltin(PERCENTILE_APPROX_WEIGHTED,
+                Lists.newArrayList(Type.DOUBLE, Type.BIGINT, Type.DOUBLE), Type.DOUBLE, Type.VARBINARY,
+                false, false, false));
+        // percentile_approx_weighted
+        addBuiltin(AggregateFunction.createBuiltin(PERCENTILE_APPROX_WEIGHTED,
+                Lists.newArrayList(Type.DOUBLE, Type.BIGINT, Type.DOUBLE, Type.DOUBLE), Type.DOUBLE, Type.VARBINARY,
                 false, false, false));
 
         addBuiltin(AggregateFunction.createBuiltin(PERCENTILE_UNION,

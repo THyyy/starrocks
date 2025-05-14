@@ -80,7 +80,7 @@ public:
     void get_levels(int16_t** def_levels, int16_t** rep_levels, size_t* num_levels) override {}
 
     void collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end_offset,
-                                 ColumnIOType type, bool active) override {}
+                                 ColumnIOTypeFlags types, bool active) override {}
 
     void select_offset_index(const SparseRange<uint64_t>& range, const uint64_t rg_first_row) override {}
 
@@ -160,7 +160,7 @@ ChunkPtr GroupReaderTest::_create_chunk(GroupReaderParam* param) {
     ChunkPtr chunk = std::make_shared<Chunk>();
     for (auto& column : param->read_cols) {
         auto c = ColumnHelper::create_column(column.slot_type(), true);
-        chunk->append_column(c, column.slot_id());
+        chunk->append_column(std::move(c), column.slot_id());
     }
     return chunk;
 }
@@ -371,8 +371,8 @@ TEST_F(GroupReaderTest, TestInit) {
     param->chunk_size = config::vector_chunk_size;
     param->file = file;
     param->file_metadata = file_meta;
-    std::set<int64_t> need_skip_rowids;
-    auto* group_reader = _pool.add(new GroupReader(*param, 0, &need_skip_rowids, 0));
+    SkipRowsContextPtr skip_rows_ctx = std::make_shared<SkipRowsContext>();
+    auto* group_reader = _pool.add(new GroupReader(*param, 0, skip_rows_ctx, 0));
 
     // init row group reader
     status = group_reader->init();
@@ -414,8 +414,8 @@ TEST_F(GroupReaderTest, TestGetNext) {
     param->chunk_size = config::vector_chunk_size;
     param->file = file;
     param->file_metadata = file_meta;
-    std::set<int64_t> need_skip_rowids;
-    auto* group_reader = _pool.add(new GroupReader(*param, 0, &need_skip_rowids, 0));
+    SkipRowsContextPtr skip_rows_ctx = std::make_shared<SkipRowsContext>();
+    auto* group_reader = _pool.add(new GroupReader(*param, 0, skip_rows_ctx, 0));
 
     // init row group reader
     status = group_reader->init();
@@ -481,8 +481,8 @@ TEST_F(GroupReaderTest, FixedValueColumnReaderTest) {
     predicates.push_back(is_null_predicate);
     predicates.push_back(is_not_null_predicate);
 
-    ASSERT_FALSE(col1->row_group_zone_map_filter(predicates, CompoundNodeType::AND, 1, 100).value());
-    ASSERT_TRUE(col1->row_group_zone_map_filter(predicates, CompoundNodeType::OR, 1, 100).value());
+    ASSERT_TRUE(col1->row_group_zone_map_filter(predicates, CompoundNodeType::AND, 1, 100).value());
+    ASSERT_FALSE(col1->row_group_zone_map_filter(predicates, CompoundNodeType::OR, 1, 100).value());
 }
 
 } // namespace starrocks::parquet

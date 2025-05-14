@@ -32,7 +32,15 @@ public:
     static void create_conjunct_ctxs(ObjectPool* pool, RuntimeState* runtime_state, std::vector<TExpr>* tExprs,
                                      std::vector<ExprContext*>* conjunct_ctxs);
 
+    static void append_smallint_conjunct(TExprOpcode::type opcode, SlotId slot_id, int value,
+                                         std::vector<TExpr>* tExprs);
     static void append_int_conjunct(TExprOpcode::type opcode, SlotId slot_id, int value, std::vector<TExpr>* tExprs);
+    static void append_bigint_conjunct(TExprOpcode::type opcode, SlotId slot_id, int64_t value,
+                                       std::vector<TExpr>* tExprs);
+    static void append_datetime_conjunct(TExprOpcode::type opcode, SlotId slot_id, const std::string& value,
+                                         std::vector<TExpr>* tExprs);
+    static void append_decimal_conjunct(TExprOpcode::type opcode, SlotId slot_id, const std::string& value,
+                                        std::vector<TExpr>* tExprs);
     static void append_string_conjunct(TExprOpcode::type opcode, SlotId slot_id, std::string value,
                                        std::vector<TExpr>* tExprs);
 
@@ -48,8 +56,12 @@ public:
                                                        TPrimitiveType::type type, std::set<std::string>& values,
                                                        std::vector<TExpr>* tExprs);
 
-    static void setup_conjuncts_manager(std::vector<ExprContext*>& conjuncts, TupleDescriptor* tuple_desc,
-                                        RuntimeState* runtime_state, HdfsScannerContext* params);
+    static void setup_conjuncts_manager(std::vector<ExprContext*>& conjuncts, const RuntimeFilterProbeCollector* rf,
+                                        TupleDescriptor* tuple_desc, RuntimeState* runtime_state,
+                                        HdfsScannerContext* params);
+
+    static void create_dictmapping_string_conjunct(TExprOpcode::type opcode, SlotId slot_id, const std::string& value,
+                                                   std::vector<TExpr>* tExprs);
 };
 
 } // namespace starrocks::parquet

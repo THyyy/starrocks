@@ -80,18 +80,6 @@ check_prerequest() {
     fi
 }
 
-# echo if gcc version is greater than 14.0.0
-# else echo ""
-echo_gt_gcc14() {
-    local version=$($CC --version | grep -oP '(?<=\s)\d+\.\d+\.\d+' | head -1)
-    if [[ $(echo -e "14.0.0\n$version" | sort -V | tail -1) == "14.0.0" ]]; then
-        echo ""
-    else
-        #gt gcc14
-        echo "$1"
-    fi
-}
-
 # sudo apt-get install cmake
 # sudo yum install cmake
 check_prerequest "${CMAKE_CMD} --version" "cmake"
@@ -254,7 +242,7 @@ build_llvm() {
 
     LLVM_TARGETS_TO_BUILD=(
         "LLVMBitstreamReader"
-        "LLVMRuntimeDyld" 
+        "LLVMRuntimeDyld"
         "LLVMOption"
         "LLVMAsmPrinter"
         "LLVMProfileData"
@@ -382,8 +370,8 @@ build_glog() {
 
     $CMAKE_CMD -G "${CMAKE_GENERATOR}" -DCMAKE_INSTALL_PREFIX=$TP_INSTALL_DIR -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_INSTALL_LIBDIR=lib
 
-    make -j$PARALLEL
-    make install
+    ${BUILD_SYSTEM} -j$PARALLEL
+    ${BUILD_SYSTEM} install
 }
 
 # gtest
@@ -581,7 +569,7 @@ build_brpc() {
     cd $TP_SOURCE_DIR/$BRPC_SOURCE
     CMAKE_GENERATOR="Unix Makefiles"
     BUILD_SYSTEM='make'
-    PATH=$PATH:$TP_INSTALL_DIR/bin/ ./config_brpc.sh --headers="$TP_INSTALL_DIR/include" --libs="$TP_INSTALL_DIR/bin $TP_INSTALL_DIR/lib" --with-glog --with-thrift    
+    PATH=$PATH:$TP_INSTALL_DIR/bin/ ./config_brpc.sh --headers="$TP_INSTALL_DIR/include" --libs="$TP_INSTALL_DIR/bin $TP_INSTALL_DIR/lib" --with-glog --with-thrift
     make -j$PARALLEL
     cp -rf output/* ${TP_INSTALL_DIR}/
     if [ -f $TP_INSTALL_DIR/lib/libbrpc.a ]; then
@@ -599,7 +587,7 @@ build_rocksdb() {
 
     CFLAGS= \
     EXTRA_CFLAGS="-I ${TP_INCLUDE_DIR} -I ${TP_INCLUDE_DIR}/snappy -I ${TP_INCLUDE_DIR}/lz4 -L${TP_LIB_DIR} ${FILE_PREFIX_MAP_OPTION}" \
-    EXTRA_CXXFLAGS=$(echo_gt_gcc14 -Wno-error=redundant-move)" -fPIC -Wno-deprecated-copy -Wno-stringop-truncation -Wno-pessimizing-move -I ${TP_INCLUDE_DIR} -I ${TP_INCLUDE_DIR}/snappy ${FILE_PREFIX_MAP_OPTION}" \
+    EXTRA_CXXFLAGS="-fPIC -Wno-redundant-move -Wno-deprecated-copy -Wno-stringop-truncation -Wno-pessimizing-move -I ${TP_INCLUDE_DIR} -I ${TP_INCLUDE_DIR}/snappy ${FILE_PREFIX_MAP_OPTION}" \
     EXTRA_LDFLAGS="-static-libstdc++ -static-libgcc" \
     PORTABLE=1 make USE_RTTI=1 -j$PARALLEL static_lib
 
@@ -664,17 +652,12 @@ build_flatbuffers() {
   cd $BUILD_DIR
   rm -rf CMakeCache.txt CMakeFiles/
 
-  export CXXFLAGS="-O3 -fno-omit-frame-pointer -fPIC -g "$(echo_gt_gcc14 "-Wno-error=stringop-overread")
-  export CPPFLAGS="-O3 -fno-omit-frame-pointer -fPIC -g "$(echo_gt_gcc14 "-Wno-error=stringop-overread")
-
   LDFLAGS="-static-libstdc++ -static-libgcc" \
   ${CMAKE_CMD} .. -G "${CMAKE_GENERATOR}" -DFLATBUFFERS_BUILD_TESTS=OFF
   ${BUILD_SYSTEM} -j$PARALLEL
   cp flatc  $TP_INSTALL_DIR/bin/flatc
   cp -r ../include/flatbuffers  $TP_INCLUDE_DIR/flatbuffers
   cp libflatbuffers.a $TP_LIB_DIR/libflatbuffers.a
-
-  restore_compile_flags
 }
 
 build_brotli() {
@@ -1100,12 +1083,16 @@ build_jemalloc() {
     fi
     # build jemalloc with release
     CFLAGS="-O3 -fno-omit-frame-pointer -fPIC -g" \
-    ./configure --prefix=${TP_INSTALL_DIR}/jemalloc --with-jemalloc-prefix=je --enable-prof --disable-cxx --disable-libdl --disable-shared $addition_opts
+    ./configure --prefix=${TP_INSTALL_DIR}/jemalloc --with-jemalloc-prefix=je --enable-prof --disable-cxx --disable-libdl $addition_opts
     make -j$PARALLEL
     make install
+    mkdir -p ${TP_INSTALL_DIR}/jemalloc/lib-shared/
+    mkdir -p ${TP_INSTALL_DIR}/jemalloc/lib-static/
+    mv ${TP_INSTALL_DIR}/jemalloc/lib/*.so* ${TP_INSTALL_DIR}/jemalloc/lib-shared/
+    mv ${TP_INSTALL_DIR}/jemalloc/lib/*.a ${TP_INSTALL_DIR}/jemalloc/lib-static/
     # build jemalloc with debug options
     CFLAGS="-O3 -fno-omit-frame-pointer -fPIC -g" \
-    ./configure --prefix=${TP_INSTALL_DIR}/jemalloc-debug --with-jemalloc-prefix=je --enable-prof --enable-debug --enable-fill --enable-prof --disable-cxx --disable-libdl --disable-shared $addition_opts
+    ./configure --prefix=${TP_INSTALL_DIR}/jemalloc-debug --with-jemalloc-prefix=je --enable-prof --disable-static --enable-debug --enable-fill --enable-prof --disable-cxx --disable-libdl $addition_opts
     make -j$PARALLEL
     make install
 }
@@ -1181,6 +1168,20 @@ build_avro_c() {
     ${BUILD_SYSTEM} -j$PARALLEL
     ${BUILD_SYSTEM} install
     rm ${TP_INSTALL_DIR}/lib64/libavro.so*
+}
+
+# avro-cpp
+build_avro_cpp() {
+    check_if_source_exist $AVRO_SOURCE
+    cd $TP_SOURCE_DIR/$AVRO_SOURCE/lang/c++
+    mkdir -p build
+    cd build
+    $CMAKE_CMD .. -DCMAKE_BUILD_TYPE=Release -DBOOST_ROOT=${TP_INSTALL_DIR} -DBoost_USE_STATIC_RUNTIME=ON  -DCMAKE_PREFIX_PATH=${TP_INSTALL_DIR} -DSNAPPY_INCLUDE_DIR=${TP_INSTALL_DIR}/include -DSNAPPY_LIBRARIES=${TP_INSTALL_DIR}/lib
+    LIBRARY_PATH=${TP_INSTALL_DIR}/lib64:$LIBRARY_PATH LD_LIBRARY_PATH=${STARROCKS_GCC_HOME}/lib64:$LD_LIBRARY_PATH ${BUILD_SYSTEM} -j$PARALLEL
+
+    # cp include and lib
+    cp libavrocpp_s.a ${TP_INSTALL_DIR}/lib64/
+    cp -r ../include/avro ${TP_INSTALL_DIR}/include/avrocpp
 }
 
 # serders
@@ -1293,7 +1294,7 @@ build_absl() {
         -DCMAKE_INSTALL_LIBDIR=lib \
         -DCMAKE_INSTALL_PREFIX="$TP_INSTALL_DIR" \
         -DCMAKE_CXX_STANDARD=17
-    
+
     ${BUILD_SYSTEM} -j "${PARALLEL}"
     ${BUILD_SYSTEM} install
 }
@@ -1334,7 +1335,7 @@ build_grpc() {
         -DCARES_ROOT_DIR=$TP_SOURCE_DIR/$CARES_SOURCE/      \
         -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
         -DCMAKE_CXX_STANDARD=17 ..
-        
+
     ${BUILD_SYSTEM} -j "${PARALLEL}"
     ${BUILD_SYSTEM} install
 }
@@ -1363,6 +1364,40 @@ build_tenann() {
     cp -r $TP_SOURCE_DIR/$TENANN_SOURCE/include/tenann $TP_INSTALL_DIR/include/tenann
     cp -r $TP_SOURCE_DIR/$TENANN_SOURCE/lib/libtenann-bundle.a $TP_INSTALL_DIR/lib/
     cp -r $TP_SOURCE_DIR/$TENANN_SOURCE/lib/libtenann-bundle-avx2.a $TP_INSTALL_DIR/lib/
+}
+
+build_icu() {
+    check_if_source_exist $ICU_SOURCE
+    cd $TP_SOURCE_DIR/$ICU_SOURCE/source
+
+    sed -i 's/\r$//' ./runConfigureICU
+    sed -i 's/\r$//' ./config.*
+    sed -i 's/\r$//' ./configure
+    sed -i 's/\r$//' ./mkinstalldirs
+
+    unset CPPFLAGS
+    unset CXXFLAGS
+    unset CFLAGS
+
+    # Use a subshell to prevent LD_LIBRARY_PATH from affecting the external environment
+    (
+        export LD_LIBRARY_PATH=${STARROCKS_GCC_HOME}/lib:${STARROCKS_GCC_HOME}/lib64:${LD_LIBRARY_PATH:-}
+        ./runConfigureICU Linux --prefix=$TP_INSTALL_DIR --enable-static --disable-shared
+        make -j$PARALLEL
+        make install
+    )
+    restore_compile_flags
+}
+
+build_xsimd() {
+    check_if_source_exist $XSIMD_SOURCE
+    cd $TP_SOURCE_DIR/$XSIMD_SOURCE
+
+    # xsimd only has header files
+    ${CMAKE_CMD} -G "${CMAKE_GENERATOR}" \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DCMAKE_INSTALL_PREFIX="$TP_INSTALL_DIR"
+    ${BUILD_SYSTEM} install
 }
 
 # restore cxxflags/cppflags/cflags to default one
@@ -1451,6 +1486,7 @@ build_starcache
 build_streamvbyte
 build_jansson
 build_avro_c
+build_avro_cpp
 build_serdes
 build_datasketches
 build_async_profiler
@@ -1459,6 +1495,8 @@ build_llvm
 build_clucene
 build_simdutf
 build_poco
+build_icu
+build_xsimd
 
 if [[ "${MACHINE_TYPE}" != "aarch64" ]]; then
     build_breakpad

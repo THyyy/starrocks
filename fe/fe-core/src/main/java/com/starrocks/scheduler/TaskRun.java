@@ -14,7 +14,9 @@
 
 package com.starrocks.scheduler;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
 import com.google.gson.annotations.SerializedName;
@@ -22,8 +24,10 @@ import com.starrocks.analysis.StringLiteral;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.Table;
+import com.starrocks.catalog.system.SystemTable;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
+import com.starrocks.common.util.LogUtil;
 import com.starrocks.common.util.PropertyAnalyzer;
 import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.load.loadv2.InsertLoadJob;
@@ -34,8 +38,8 @@ import com.starrocks.scheduler.persist.TaskRunStatus;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.SystemVariable;
 import com.starrocks.sql.ast.UserIdentity;
+import com.starrocks.sql.optimizer.rule.transformation.materialization.MvUtils;
 import com.starrocks.warehouse.Warehouse;
-import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.jetbrains.annotations.NotNull;
@@ -45,6 +49,8 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+
+import static com.starrocks.common.util.PropertyAnalyzer.PROPERTIES_WAREHOUSE;
 
 public class TaskRun implements Comparable<TaskRun> {
 
@@ -59,7 +65,9 @@ public class TaskRun implements Comparable<TaskRun> {
     public static final String START_TASK_RUN_ID = "START_TASK_RUN_ID";
     // All properties that can be set in TaskRun
     public static final Set<String> TASK_RUN_PROPERTIES = ImmutableSet.of(
-            MV_ID, PARTITION_START, PARTITION_END, FORCE, START_TASK_RUN_ID, PARTITION_VALUES);
+            MV_ID, PARTITION_START, PARTITION_END, FORCE, START_TASK_RUN_ID, PARTITION_VALUES, PROPERTIES_WAREHOUSE);
+
+    public static final int INVALID_TASK_PROGRESS = -1;
 
     // Only used in FE's UT
     public static final String IS_TEST = "__IS_TEST__";
@@ -192,18 +200,43 @@ public class TaskRun implements Comparable<TaskRun> {
 
             Warehouse w = GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouse(
                     materializedView.getWarehouseId());
-            newProperties.put(PropertyAnalyzer.PROPERTIES_WAREHOUSE, w.getName());
+            newProperties.put(PROPERTIES_WAREHOUSE, w.getName());
+
+            // set current warehouse
+            ctx.setCurrentWarehouse(w.getName());
         } catch (Exception e) {
             LOG.warn("refresh task properties failed:", e);
         }
         return newProperties;
     }
 
-    private void handleWarehouseProperty() {
-        String warehouseId = properties.remove(PropertyAnalyzer.PROPERTIES_WAREHOUSE_ID);
-        if (warehouseId != null) {
-            runCtx.setCurrentWarehouseId(Long.parseLong(warehouseId));
+    @VisibleForTesting
+    public ConnectContext buildTaskRunConnectContext() {
+        // Create a new ConnectContext for this task run
+        final ConnectContext context = new ConnectContext(null);
+
+        if (parentRunCtx != null) {
+            context.setParentConnectContext(parentRunCtx);
         }
+        context.setGlobalStateMgr(GlobalStateMgr.getCurrentState());
+        context.setCurrentCatalog(task.getCatalogName());
+        context.setDatabase(task.getDbName());
+        context.setQualifiedUser(status.getUser());
+        if (status.getUserIdentity() != null) {
+            context.setCurrentUserIdentity(status.getUserIdentity());
+        } else {
+            context.setCurrentUserIdentity(UserIdentity.createAnalyzedUserIdentWithIp(status.getUser(), "%"));
+        }
+        context.setCurrentRoleIds(context.getCurrentUserIdentity());
+        context.getState().reset();
+        context.setQueryId(UUID.fromString(status.getQueryId()));
+        context.setIsLastStmt(true);
+        context.resetSessionVariable();
+
+        // NOTE: Ensure the thread local connect context is always the same with the newest ConnectContext.
+        // NOTE: Ensure this thread local is removed after this method to avoid memory leak in JVM.
+        context.setThreadLocalInfo();
+        return context;
     }
 
     public boolean executeTaskRun() throws Exception {
@@ -214,48 +247,34 @@ public class TaskRun implements Comparable<TaskRun> {
         // Use task's definition rather than status's to avoid costing too much metadata memory.
         Preconditions.checkNotNull(task.getDefinition(), "The definition of task run should not null");
         taskRunContext.setDefinition(task.getDefinition());
-        taskRunContext.setPostRun(status.getPostRun());
 
-        runCtx = new ConnectContext(null);
-        if (parentRunCtx != null) {
-            runCtx.setParentConnectContext(parentRunCtx);
-        }
-        runCtx.setGlobalStateMgr(GlobalStateMgr.getCurrentState());
-        runCtx.setCurrentCatalog(task.getCatalogName());
-        runCtx.setDatabase(task.getDbName());
-        runCtx.setQualifiedUser(status.getUser());
-        if (status.getUserIdentity() != null) {
-            runCtx.setCurrentUserIdentity(status.getUserIdentity());
-        } else {
-            runCtx.setCurrentUserIdentity(UserIdentity.createAnalyzedUserIdentWithIp(status.getUser(), "%"));
-        }
-        runCtx.setCurrentRoleIds(runCtx.getCurrentUserIdentity());
-        runCtx.getState().reset();
-        runCtx.setQueryId(UUID.fromString(status.getQueryId()));
-        runCtx.setIsLastStmt(true);
-
-        // NOTE: Ensure the thread local connect context is always the same with the newest ConnectContext.
-        // NOTE: Ensure this thread local is removed after this method to avoid memory leak in JVM.
-        runCtx.setThreadLocalInfo();
+        // build context for task run
+        this.runCtx = buildTaskRunConnectContext();
 
         Map<String, String> newProperties = refreshTaskProperties(runCtx);
         properties.putAll(newProperties);
         Map<String, String> taskRunContextProperties = Maps.newHashMap();
-        runCtx.resetSessionVariable();
-        if (properties != null) {
-            handleWarehouseProperty();
-            for (String key : properties.keySet()) {
-                try {
-                    runCtx.modifySystemVariable(new SystemVariable(key, new StringLiteral(properties.get(key))), true);
-                } catch (DdlException e) {
-                    // not session variable
-                    taskRunContextProperties.put(key, properties.get(key));
-                }
+        for (String key : properties.keySet()) {
+            try {
+                runCtx.modifySystemVariable(new SystemVariable(key, new StringLiteral(properties.get(key))), true);
+            } catch (DdlException e) {
+                // not session variable
+                taskRunContextProperties.put(key, properties.get(key));
             }
         }
+        // set warehouse
+        String currentWarehouse = properties.get(PropertyAnalyzer.PROPERTIES_WAREHOUSE);
+        if (currentWarehouse != null) {
+            runCtx.setCurrentWarehouse(currentWarehouse);
+            taskRunContextProperties.put(PropertyAnalyzer.PROPERTIES_WAREHOUSE, currentWarehouse);
+        }
+
         LOG.info("[QueryId:{}] [ThreadLocal QueryId: {}] start to execute task run, task_id:{}, " +
                         "taskRunContextProperties:{}", runCtx.getQueryId(),
                 ConnectContext.get() == null ? "" : ConnectContext.get().getQueryId(), taskId, taskRunContextProperties);
+
+        // Set the post run action
+        taskRunContext.setPostRun(task.getPostRun());
         // If this is the first task run of the job, use its uuid as the job id.
         taskRunContext.setTaskRunId(taskRunId);
         taskRunContext.setCtx(runCtx);
@@ -267,6 +286,9 @@ public class TaskRun implements Comparable<TaskRun> {
         taskRunContext.setExecuteOption(executeOption);
         taskRunContext.setTaskRun(this);
 
+        // prepare to execute task run, move it here so that we can catch the exception and set the status
+        processor.prepare(taskRunContext);
+        // process task run
         processor.processTaskRun(taskRunContext);
 
         QueryState queryState = runCtx.getState();
@@ -283,12 +305,10 @@ public class TaskRun implements Comparable<TaskRun> {
         }
 
         // Execute post task action, but ignore any exception
-        if (StringUtils.isNotEmpty(taskRunContext.getPostRun())) {
-            try {
-                processor.postTaskRun(taskRunContext);
-            } catch (Exception ignored) {
-                LOG.warn("Execute post taskRun failed {} ", status, ignored);
-            }
+        try {
+            processor.postTaskRun(taskRunContext);
+        } catch (Exception ignored) {
+            LOG.warn("Execute post taskRun failed {} ", status, ignored);
         }
         return true;
     }
@@ -297,33 +317,54 @@ public class TaskRun implements Comparable<TaskRun> {
         return runCtx;
     }
 
+    protected void setRunCtx(ConnectContext runCtx) {
+        this.runCtx = runCtx;
+    }
+
     public TaskRunStatus getStatus() {
         if (status == null) {
             return null;
         }
-        switch (status.getState()) {
-            case RUNNING:
-                if (runCtx != null) {
-                    StmtExecutor executor = runCtx.getExecutor();
-                    if (executor != null && executor.getCoordinator() != null) {
-                        long jobId = executor.getCoordinator().getLoadJobId();
-                        if (jobId != -1) {
-                            InsertLoadJob job = (InsertLoadJob) GlobalStateMgr.getCurrentState()
-                                    .getLoadMgr().getLoadJob(jobId);
-                            int progress = job.getProgress();
-                            if (progress == 100) {
-                                progress = 99;
-                            }
-                            status.setProgress(progress);
-                        }
-                    }
-                }
-                break;
-            case SUCCESS:
-                status.setProgress(100);
-                break;
+        final int progress = getProgress();
+        if (progress != INVALID_TASK_PROGRESS) {
+            status.setProgress(progress);
         }
         return status;
+    }
+
+    private int getProgress() {
+        if (status == null) {
+            return INVALID_TASK_PROGRESS;
+        }
+
+        if (status.getState().isSuccessState()) {
+            return 100;
+        } else if (status.getState().isFinishState()) {
+            return INVALID_TASK_PROGRESS;
+        } else {
+            if (runCtx == null) {
+                return INVALID_TASK_PROGRESS;
+            }
+            final StmtExecutor executor = runCtx.getExecutor();
+            if (executor == null || executor.getCoordinator() == null) {
+                return INVALID_TASK_PROGRESS;
+            }
+            final long jobId = executor.getCoordinator().getLoadJobId();
+            if (jobId == -1) {
+                return INVALID_TASK_PROGRESS;
+            }
+            final InsertLoadJob job = (InsertLoadJob) GlobalStateMgr.getCurrentState()
+                    .getLoadMgr().getLoadJob(jobId);
+            if (job == null) {
+                return INVALID_TASK_PROGRESS;
+            }
+            int progress = job.getProgress();
+            // if the progress is 100, we should return 99 to avoid the task run is marked as success
+            if (progress == 100) {
+                progress = 99;
+            }
+            return progress;
+        }
     }
 
     public TaskRunStatus initStatus(String queryId, Long createTime) {
@@ -343,7 +384,11 @@ public class TaskRun implements Comparable<TaskRun> {
         // NOTE: definition will cause a lot of repeats and cost a lot of metadata memory resources,
         // since history task runs has been stored in sr's internal table, we can save it in the
         // task run status.
-        status.setDefinition(task.getDefinition());
+        if (!Strings.isNullOrEmpty(task.getDefinition())) {
+            // Remove line separator and shrink to MAX_FIELD_VARCHAR_LENGTH/4 which is defined in the TaskRunsSystemTable.java
+            String query = LogUtil.removeLineSeparator(task.getDefinition());
+            status.setDefinition(MvUtils.shrinkToSize(query, SystemTable.MAX_FIELD_VARCHAR_LENGTH / 4));
+        }
         status.getMvTaskRunExtraMessage().setExecuteOption(this.executeOption);
 
         LOG.info("init task status, task:{}, query_id:{}, create_time:{}", task.getName(), queryId, status.getCreateTime());

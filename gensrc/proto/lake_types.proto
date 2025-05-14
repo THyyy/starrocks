@@ -153,6 +153,8 @@ message TabletMetadataPB {
     map<int64, TabletSchemaPB> historical_schemas = 17;
     // rowset_id -> schema_id
     map<uint32, int64> rowset_to_schema = 18;
+    // global transaction id
+    optional int64 gtid = 19 [default=0];
 }
 
 message MetadataUpdateInfoPB {
@@ -160,6 +162,12 @@ message MetadataUpdateInfoPB {
     optional bool enable_persistent_index = 1;
     optional TabletSchemaPB tablet_schema = 2;
     optional PersistentIndexTypePB persistent_index_type = 3;
+}
+
+message SharedTabletMetadataPB {
+    optional int64 schema_id = 1; // the latest schema id of all tablet
+    map<int64, TabletSchemaPB> schemas = 2;
+    map<int64, PagePointerPB> tablet_meta_pages = 3;
 }
 
 message TxnLogPB {
@@ -180,6 +188,14 @@ message TxnLogPB {
         optional PersistentIndexSstablePB output_sstable = 4;
         // Base version of compaction task, used for conflict check with partial update
         optional int64 compact_version = 5;
+        // For normal compaction, all segments in `output_rowset` will be new segments.
+        // For partial compaction, we put compacted segments and uncompacted segments
+        // together, and when compaction is aborted, we need to avoid uncompacted segments
+        // being deleted.
+        // e.g., a b x y e f, in `output_rowset`, a,b,e,f might be uncompacted segments,
+        // x and y might be new segments
+        optional int32 new_segment_offset = 6;
+        optional int32 new_segment_count = 7;
     }
 
     message OpSchemaChange {
@@ -232,5 +248,7 @@ message TxnInfoPB {
     optional bool combined_txn_log = 3;
     optional TxnTypePB txn_type = 4;
     optional bool force_publish = 5; // only used for compaction
+    optional bool rebuild_pindex = 6;
+    optional int64 gtid = 7 [default=0];
 };
 

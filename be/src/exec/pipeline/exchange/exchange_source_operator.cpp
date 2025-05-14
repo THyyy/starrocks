@@ -26,6 +26,8 @@ Status ExchangeSourceOperator::prepare(RuntimeState* state) {
     RETURN_IF_ERROR(SourceOperator::prepare(state));
     _stream_recvr = static_cast<ExchangeSourceOperatorFactory*>(_factory)->create_stream_recvr(state);
     _stream_recvr->bind_profile(_driver_sequence, _unique_metrics);
+    _stream_recvr->attach_observer(state, observer());
+    _stream_recvr->attach_query_ctx(state->query_ctx());
     return Status::OK();
 }
 
@@ -52,6 +54,11 @@ StatusOr<ChunkPtr> ExchangeSourceOperator::pull_chunk(RuntimeState* state) {
     return std::move(chunk);
 }
 
+std::string ExchangeSourceOperator::get_name() const {
+    std::string finished = is_finished() ? "X" : "O";
+    return fmt::format("{}_{}_{}({}) {{ has_output:{}}}", _name, _plan_node_id, (void*)this, finished, has_output());
+}
+
 ExchangeSourceOperatorFactory::~ExchangeSourceOperatorFactory() {
     if (_stream_recvr != nullptr && _stream_recvr_cnt != 0) {
         // NOTE: it is possible that the ExchangeSourceOperator::prepare() is called, but the ExchangeSourceOperator::set_finishing()
@@ -62,6 +69,7 @@ ExchangeSourceOperatorFactory::~ExchangeSourceOperatorFactory() {
         // `_stream_recvr` design, moves the responsibility from the operator to the operator factory.
         LOG(INFO) << "ExchangeSourceOperatorFactory::_stream_recvr_cnt=" << _stream_recvr_cnt
                   << ", the _stream_recvr is created without properly cleaned. Force close it!";
+        _stream_recvr->detach_observer();
         _stream_recvr->close();
     }
 }

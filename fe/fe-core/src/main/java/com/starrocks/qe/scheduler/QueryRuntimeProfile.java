@@ -129,14 +129,14 @@ public class QueryRuntimeProfile {
     // ------------------------------------------------------------------------------------
     // Fields for export.
     // ------------------------------------------------------------------------------------
-    private final List<String> exportFiles = Lists.newArrayList();
-    private final List<TTabletCommitInfo> commitInfos = Lists.newArrayList();
-    private final List<TTabletFailInfo> failInfos = Lists.newArrayList();
+    private final List<String> exportFiles = Lists.newCopyOnWriteArrayList();
+    private final List<TTabletCommitInfo> commitInfos = Lists.newCopyOnWriteArrayList();
+    private final List<TTabletFailInfo> failInfos = Lists.newCopyOnWriteArrayList();
 
     // ------------------------------------------------------------------------------------
     // Fields for external table sink
     // ------------------------------------------------------------------------------------
-    private final List<TSinkCommitInfo> sinkCommitInfos = Lists.newArrayList();
+    private final List<TSinkCommitInfo> sinkCommitInfos = Lists.newCopyOnWriteArrayList();
 
     // Fields for datacache
     private final DataCacheSelectMetrics dataCacheSelectMetrics = new DataCacheSelectMetrics();
@@ -165,6 +165,14 @@ public class QueryRuntimeProfile {
             fragmentProfiles.add(profile);
             queryProfile.addChild(profile);
         }
+    }
+
+    public List<RuntimeProfile> getFragmentProfiles() {
+        return fragmentProfiles;
+    }
+
+    public boolean hasLoadChannelProfile() {
+        return loadChannelProfile.isPresent() && !loadChannelProfile.get().getChildList().isEmpty();
     }
 
     public List<String> getDeltaUrls() {
@@ -247,10 +255,6 @@ public class QueryRuntimeProfile {
     public void finishAllInstances(Status status) {
         if (profileDoneSignal != null) {
             profileDoneSignal.countDownToZero(status);
-            List<String> unFinishedInstanceIds = getUnfinishedInstanceIds();
-            if (!unFinishedInstanceIds.isEmpty()) {
-                LOG.info("unfinished instances: {}", unFinishedInstanceIds);
-            }
         }
     }
 
@@ -405,8 +409,11 @@ public class QueryRuntimeProfile {
     }
 
     public RuntimeProfile buildQueryProfile(boolean needMerge) {
-        if (!needMerge || !jobSpec.isEnablePipeline()) {
+        if (!needMerge) {
             return queryProfile;
+        }
+        if (!jobSpec.isEnablePipeline()) {
+            return mergeNonPipelineProfile();
         }
 
         RuntimeProfile newQueryProfile = new RuntimeProfile(queryProfile.getName());
@@ -616,6 +623,21 @@ public class QueryRuntimeProfile {
         return newQueryProfile;
     }
 
+    RuntimeProfile mergeNonPipelineProfile() {
+        if (loadChannelProfile.isEmpty()) {
+            return queryProfile;
+        }
+        RuntimeProfile newQueryProfile = new RuntimeProfile(queryProfile.getName());
+        newQueryProfile.copyAllInfoStringsFrom(queryProfile, null);
+        newQueryProfile.copyAllCountersFrom(queryProfile);
+        for (RuntimeProfile fragmentProfile : fragmentProfiles) {
+            newQueryProfile.addChild(fragmentProfile);
+        }
+        Optional<RuntimeProfile> mergedLoadChannelProfile = mergeLoadChannelProfile();
+        mergedLoadChannelProfile.ifPresent(newQueryProfile::addChild);
+        return newQueryProfile;
+    }
+
     Optional<RuntimeProfile> mergeLoadChannelProfile() {
         if (loadChannelProfile.isEmpty()) {
             return Optional.empty();
@@ -681,7 +703,11 @@ public class QueryRuntimeProfile {
         for (Pair<RuntimeProfile, Boolean> child : pipelineProfile.getChildList()) {
             RuntimeProfile operatorProfile = child.first;
             RuntimeProfile commonMetrics = operatorProfile.getChild("CommonMetrics");
-            Preconditions.checkNotNull(commonMetrics);
+            // skip it if it does not contain CommonMetrics
+            if (commonMetrics == null) {
+                LOG.warn("Pipeline profile does not contain CommonMetrics: {}", operatorProfile);
+                continue;
+            }
 
             if (commonMetrics.containsInfoString("IsChild")) {
                 continue;

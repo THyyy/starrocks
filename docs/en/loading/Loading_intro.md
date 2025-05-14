@@ -3,6 +3,8 @@ displayed_sidebar: docs
 toc_max_heading_level: 3
 ---
 
+<head><meta name="docsearch:pagerank" content="100"/></head>
+
 # Loading options
 
 Data loading is the process of cleansing and transforming raw data from various data sources based on your business requirements and loading the resulting data into StarRocks to facilitate analysis.
@@ -182,7 +184,7 @@ This section lists the loading options available for common data sources, helpin
 | **Data source** | **Available loading options**                                |
 | --------------- | ------------------------------------------------------------ |
 | Apache Hive™    | <ul><li>(Batch) Create a [Hive catalog](../data_source/catalog/hive_catalog.md) and then use [INSERT INTO SELECT FROM `<table_name>`](InsertInto.md#insert-data-from-an-internal-or-external-table-into-an-internal-table).</li><li>(Batch) [Spark Load](https://docs.starrocks.io/docs/loading/SparkLoad/).</li></ul> |
-| Apache Iceberg  | (Batch) Create an [Iceberg catalog](../data_source/catalog/iceberg_catalog.md) and then use [INSERT INTO SELECT FROM `<table_name>`](InsertInto.md#insert-data-from-an-internal-or-external-table-into-an-internal-table). |
+| Apache Iceberg  | (Batch) Create an [Iceberg catalog](../data_source/catalog/iceberg/iceberg_catalog.md) and then use [INSERT INTO SELECT FROM `<table_name>`](InsertInto.md#insert-data-from-an-internal-or-external-table-into-an-internal-table). |
 | Apache Hudi     | (Batch) Create a [Hudi catalog](../data_source/catalog/hudi_catalog.md) and then use [INSERT INTO SELECT FROM `<table_name>`](InsertInto.md#insert-data-from-an-internal-or-external-table-into-an-internal-table). |
 | Delta Lake      | (Batch) Create a [Delta Lake catalog](../data_source/catalog/deltalake_catalog.md) and then use [INSERT INTO SELECT FROM `<table_name>`](InsertInto.md#insert-data-from-an-internal-or-external-table-into-an-internal-table). |
 | Elasticsearch   | (Batch) Create an [Elasticsearch catalog](../data_source/catalog/elasticsearch_catalog.md) and then use [INSERT INTO SELECT FROM `<table_name>`](InsertInto.md#insert-data-from-an-internal-or-external-table-into-an-internal-table). |

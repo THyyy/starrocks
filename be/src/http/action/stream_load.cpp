@@ -182,7 +182,6 @@ void StreamLoadAction::handle(HttpRequest* req) {
     streaming_load_requests_total.increment(1);
     streaming_load_duration_ms.increment(ctx->load_cost_nanos / 1000000);
     streaming_load_bytes.increment(ctx->receive_bytes);
-    streaming_load_current_processing.increment(-1);
 }
 
 Status StreamLoadAction::_handle(StreamLoadContext* ctx) {
@@ -217,15 +216,14 @@ Status StreamLoadAction::_handle(StreamLoadContext* ctx) {
 }
 
 Status StreamLoadAction::_handle_batch_write(starrocks::HttpRequest* http_req, StreamLoadContext* ctx) {
+    ctx->mc_read_data_cost_nanos = MonotonicNanos() - ctx->start_nanos;
     ctx->load_parameters = get_load_parameters_from_http(http_req);
     ctx->buffer->flip();
     return _exec_env->batch_write_mgr()->append_data(ctx);
 }
 
 int StreamLoadAction::on_header(HttpRequest* req) {
-    streaming_load_current_processing.increment(1);
-
-    auto* ctx = new StreamLoadContext(_exec_env);
+    auto* ctx = new StreamLoadContext(_exec_env, &streaming_load_current_processing);
     ctx->ref();
     req->set_handler_ctx(ctx);
 
@@ -269,7 +267,6 @@ int StreamLoadAction::on_header(HttpRequest* req) {
         }
         auto str = ctx->to_json();
         _send_reply(req, str);
-        streaming_load_current_processing.increment(-1);
         return -1;
     }
     return 0;

@@ -19,6 +19,7 @@ import com.google.common.collect.Lists;
 import com.starrocks.common.Status;
 import com.starrocks.common.util.DebugUtil;
 import com.starrocks.common.util.RuntimeProfile;
+import com.starrocks.metric.MetricRepo;
 import com.starrocks.planner.PlanFragmentId;
 import com.starrocks.proto.PExecPlanFragmentResult;
 import com.starrocks.proto.PPlanFragmentCancelReason;
@@ -74,7 +75,7 @@ import java.util.stream.Collectors;
 public class FragmentInstanceExecState {
     private static final Logger LOG = LogManager.getLogger(FragmentInstanceExecState.class);
 
-    private State state = State.CREATED;
+    private volatile State state = State.CREATED;
 
     private final JobSpec jobSpec;
     private final PlanFragmentId fragmentId;
@@ -175,7 +176,7 @@ public class FragmentInstanceExecState {
      * The state transitions to DEPLOYING.
      */
     public void deployAsync() {
-        transitionState(State.DEPLOYING);
+        transitionState(State.CREATED, State.DEPLOYING);
 
         TNetworkAddress brpcAddress = worker.getBrpcAddress();
         try {
@@ -290,9 +291,11 @@ public class FragmentInstanceExecState {
             failure = e;
         }
 
+        MetricRepo.COUNTER_BRPC_EXEC_PLAN_FRAGMENT.increase(1L);
         if (code == TStatusCode.OK) {
             transitionState(State.DEPLOYING, State.EXECUTING);
         } else {
+            MetricRepo.COUNTER_BRPC_EXEC_PLAN_FRAGMENT_ERROR.increase(1L);
             transitionState(State.DEPLOYING, State.FAILED);
 
             if (errMsg == null) {
@@ -373,7 +376,8 @@ public class FragmentInstanceExecState {
                     jobSpec.getQueryId(), instanceId, cancelReason,
                     jobSpec.isEnablePipeline());
         } catch (RpcException e) {
-            LOG.warn("cancel plan fragment get a exception, address={}:{}", brpcAddress.getHostname(), brpcAddress.getPort(), e);
+            LOG.warn("cancel plan fragment get a exception, address={}:{}", brpcAddress.getHostname(),
+                    brpcAddress.getPort(), e);
             SimpleScheduler.addToBlocklist(worker.getId());
             return false;
         }
@@ -475,6 +479,10 @@ public class FragmentInstanceExecState {
         }
     }
 
+    public State getState() {
+        return state;
+    }
+
     public enum State {
         CREATED,
         DEPLOYING,
@@ -490,6 +498,10 @@ public class FragmentInstanceExecState {
 
         public boolean isTerminal() {
             return this == FINISHED || this == FAILED;
+        }
+
+        public boolean isFinished() {
+            return this == FINISHED;
         }
     }
 

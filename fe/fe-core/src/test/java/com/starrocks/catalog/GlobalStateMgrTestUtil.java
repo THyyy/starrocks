@@ -62,6 +62,7 @@ public class GlobalStateMgrTestUtil {
     public static String testDb1 = "testDb1";
     public static long testDbId1 = 1;
     public static String testTable1 = "testTable1";
+    public static String testTable2 = "testTable2";
     public static String testTable7 = "testTable7";
     public static long testTableId1 = 2;
     public static String testPartition1 = "testPartition1";
@@ -89,6 +90,8 @@ public class GlobalStateMgrTestUtil {
     public static String testTxnLable8 = "testTxnLable8";
     public static String testTxnLable9 = "testTxnLable9";
     public static String testTxnLable10 = "testTxnLable10";
+    public static String testTxnLableCompaction1 = "testTxnLableCompaction1";
+    public static String testTxnLableCompaction2 = "testTxnLableCompaction2";
     public static String testEsTable1 = "partitionedEsTable1";
     public static long testEsTableId1 = 14;
 
@@ -225,6 +228,7 @@ public class GlobalStateMgrTestUtil {
         table.setIndexMeta(indexId, testIndex1, columns, 0, testSchemaHash1, (short) 1, TStorageType.COLUMN,
                 KeysType.AGG_KEYS);
         table.setBaseIndexId(indexId);
+        table.setReplicationNum((short) 3);
         // db
         Database db = new Database(dbId, testDb1);
         db.registerTableUnlocked(table);
